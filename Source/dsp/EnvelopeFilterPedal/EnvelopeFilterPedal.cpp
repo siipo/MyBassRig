@@ -49,8 +49,7 @@ void EnvelopeFilterPedal::addParameters (juce::AudioProcessorValueTreeState::Par
 
     // Off by default, like the compressor: an effect this audible should be
     // something you switch on, not something a fresh instance does at you.
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::envOn, 1 }, "Filter", false));
+    layout.add (Params::boolParam (ParamID::envOn, "Filter", false));
 
     layout.add (Params::percentParam (ParamID::envSens, "Sens", 0.5f));
 

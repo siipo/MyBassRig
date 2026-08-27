@@ -86,12 +86,20 @@ target_compile_definitions(BassRigDSP PUBLIC
 # ---------------------------------------------------------------------------
 # The plugin
 # ---------------------------------------------------------------------------
+# AU only builds on Apple platforms, and juce_add_plugin errors rather than
+# skipping it if it is listed elsewhere.
+set(BASSRIG_FORMATS VST3 Standalone)
+
+if(APPLE)
+    list(APPEND BASSRIG_FORMATS AU)
+endif()
+
 juce_add_plugin(BassRig
     PRODUCT_NAME "BassRig"
     COMPANY_NAME "BassRig"
     PLUGIN_MANUFACTURER_CODE Brig
     PLUGIN_CODE Bsrg
-    FORMATS VST3 Standalone
+    FORMATS ${BASSRIG_FORMATS}
     VST3_CATEGORIES Fx Distortion
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE

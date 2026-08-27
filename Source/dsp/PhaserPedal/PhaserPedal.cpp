@@ -35,8 +35,7 @@ void PhaserPedal::addParameters (juce::AudioProcessorValueTreeState::ParameterLa
 {
     using Range = juce::NormalisableRange<float>;
 
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::phaserOn, 1 }, "Phaser", false));
+    layout.add (Params::boolParam (ParamID::phaserOn, "Phaser", false));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::phaserRate, 1 }, "Phaser Rate",
@@ -55,8 +54,7 @@ void PhaserPedal::addParameters (juce::AudioProcessorValueTreeState::ParameterLa
 
     // Summing the dry and wet paths in antiphase moves the notches somewhere
     // else entirely, so this is a second voice rather than a polarity nicety.
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::phaserInvert, 1 }, "Invert", false));
+    layout.add (Params::boolParam (ParamID::phaserInvert, "Invert", false));
 
     // Below this, the signal is not phased at all.
     layout.add (std::make_unique<juce::AudioParameterFloat> (

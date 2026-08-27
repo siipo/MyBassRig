@@ -40,8 +40,7 @@ void NoiseGatePedal::addParameters (juce::AudioProcessorValueTreeState::Paramete
 {
     using Range = juce::NormalisableRange<float>;
 
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::gateOn, 1 }, "Gate", false));
+    layout.add (Params::boolParam (ParamID::gateOn, "Gate", false));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::gateThreshold, 1 }, "Gate Threshold",

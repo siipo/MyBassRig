@@ -853,6 +853,110 @@ Worth recording, because the wrong ones were all plausible:
 ---
 
 
+## 3p. The bug the tests could not see
+
+pluginval at strictness 10, run for the first time after fifteen build steps and
+94 green tests, failed:
+
+```
+!!! Test 30 failed: Phaser not restored on setStateInformation
+      -- Expected value within 0.1 of: 0, Actual value: 0.374501
+!!! Test 38 failed: Chorus not restored on setStateInformation
+      -- Expected value within 0.1 of: 0, Actual value: 0.104727
+```
+
+Nothing in this project could have found it. Every test here listens to the
+output, and the output was correct. What was wrong was the host's view of a
+parameter.
+
+### The mechanism
+
+`juce::AudioParameterBool` stores whatever raw normalised float it is handed and
+only thresholds at 0.5 when read, so it will sit at 0.47 while reporting false.
+That much is fine. The problem is its `NormalisableRange`, which is
+`{ 0.0f, 1.0f, 1.0f }` — interval 1. APVTS saves the **denormalised** value, and
+denormalising 0.47 through an interval of 1 snaps it to 0. **The save is lossy.**
+
+The host does not forget. A VST3 host caches the value it sent, so after a save
+and restore its cache says 0.47 and the plugin says 0. That divergence is wrong
+in an automation lane and wrong again the next time the host saves.
+
+The fix is one character — a continuous range, `{ 0.0f, 1.0f }`. Normalised and
+denormalised then agree and the save is exact. The parameter still reports two
+steps and still reads as a boolean, so hosts still draw a switch, and `get()`
+thresholds exactly as before. `Params::LosslessBool` is otherwise a
+transcription of JUCE's class, written out rather than subclassed because
+`AudioParameterBool` declares `setValue`, `getValue` and its backing float all
+private and `get()` is non-virtual.
+
+### Two fixes before it, both wrong the same way
+
+Worth recording because both looked right and one of them passed.
+
+1. **Force every parameter to match the tree after `replaceState`.** APVTS skips
+   any parameter whose denormalised value is unchanged, so the restore was a
+   no-op; re-applying it afterwards fixed the failing case. It also made the
+   round trip land on exactly 0 or 1, which is not what the host sent, so
+   pluginval kept failing — with a different message. Treating the divergence
+   rather than its cause.
+
+2. **Snap on assignment**, the way `AudioParameterChoice` does. This made the
+   plugin silently alter values the host had sent, which is the same divergence
+   with the sign flipped. pluginval carried on failing at about the same rate:
+   3 runs in 8.
+
+Both were abandoned only after reading pluginval's own source, which settled in
+thirty seconds what two rounds of plausible reasoning had got wrong:
+
+```cpp
+const auto originalValue = parameter->getValue();
+parameter->setValue (r.nextFloat());
+callSetStateInformationOnMessageThreadIfVST3 (instance, originalState);
+ut.expectWithinAbsoluteError (parameter->getValue(), originalValue, 0.1f);
+```
+
+It asks for the value the host last saw. Not something equivalent to it.
+
+### Why it took ten runs to believe
+
+The test draws a uniform random value, and the 0.1 tolerance forgives a draw
+that lands near a step. So a broken build passes whenever the draw falls in
+`[0, 0.1]` or `[0.9, 1]` — about one run in five, and independently per
+parameter. The first run failed on parameters 30 and 38; later runs failed on
+parameter 1 and nothing else.
+
+A single green pluginval run would have been meaningless. The evidence is:
+
+| Build | pluginval runs | Result |
+|---|---|---|
+| Broken (`{ 0, 1, 1 }`) | 4 | 4 failed |
+| Fixed (`{ 0, 1 }`) | 10 | 10 passed |
+
+CI therefore runs `--repeat 10 --randomise`, not a single pass.
+
+### What was deleted
+
+A test asserting the same fault for `AudioParameterChoice` was written, run
+against the **broken** build, and passed. Choice parameters run assignment
+through their range, which snaps to whole indices, so they cannot hold a stale
+fraction and never had the bug. It was deleted rather than kept green — this is
+the third time in this project a test has passed against code it was supposed to
+catch, and the rule stands: a test that passes with the fix removed is testing
+nothing.
+
+The first fix was deleted on the same grounds. Once the range was continuous the
+whole suite passed without it, so it was doing nothing but looking careful.
+
+### The lesson worth keeping
+
+94 tests, every DSP claim measured, every guard validated by sabotage — and a
+plugin that misreported its own parameters to every host that loaded it. The
+tests were all pointed at the audio. Nothing was pointed at the contract with
+the host, because that contract is not observable from inside.
+
+---
+
+
 ## 4. Fixing what went wrong in Wibeboard
 
 | Wibeboard | BassRig |
@@ -927,20 +1031,34 @@ reference project above. Consequences:
         rather than tracking, and given a Growl control. 93 tests green.
 15. [x] Octave jumping up on decaying notes: squelch flicker resetting the
         divider. Three redundant guards. 94 tests green.
+16. [x] CI on Linux, macOS and Windows, with pluginval at strictness 10 and
+        `--repeat 10`. It found a state-restoration bug on its first run that
+        no test here could see. AU added, since macOS runners make it free.
+        95 tests green.
 
 ### Also outstanding
 
-- pluginval is not wired into the build yet.
 - The tone stack runs at base rate, so its treble response carries some bilinear
   frequency warping near 10 kHz. Upstream oversamples the Baxandall to avoid
   this. Unmeasured.
 - The compressor is untested by ear too, and its knee (6 dB), detector (RMS)
   and gain computer (feed forward) are single fixed choices rather than the
   switchable modes chowdsp offers.
-- Nothing has been judged by ear. Every voicing value is set so a control is
-  measurably distinct and evenly spread, which is not the same as sounding good.
-  The Grunt corners (5 / 100 / 250 Hz), the recovery low-pass at 5 kHz and the
-  interstage gain of 1.8 are all still first guesses in that sense.
+- The voicing has not been A/B'd against reference hardware or other plugins.
+  It HAS been played, and two of the bugs above came from playing it rather than
+  from any test, but every voicing value is still set so a control is measurably
+  distinct and evenly spread, which is not the same as sounding good. The Grunt
+  corners (5 / 100 / 250 Hz), the recovery low-pass at 5 kHz and the interstage
+  gain of 1.8 are all still first guesses in that sense.
+- The octaver generates its square by hard-switching at base rate, with no
+  band limiting and no oversampling, and the tone low-pass runs after the edge
+  rather than before it. Aliasing is therefore structural. It is the one place
+  in the plugin where a discontinuity is synthesised and the ADAA discipline
+  applied everywhere else is not. Unmeasured — measure against a naive build
+  before assuming it matters.
+- The macOS and Linux builds are CI-verified but have never been run in a host
+  by a person. AU passes pluginval; it has not been opened in Logic.
+- Release binaries are unsigned on both Windows and macOS.
 - The drive makeup table is calibrated at one reference level, a 220 Hz tone at
   half scale. A much hotter or quieter input will not track it exactly.
 - Attack is asymmetric in effect: +3.2 dB boost against -1.3 dB cut, because the

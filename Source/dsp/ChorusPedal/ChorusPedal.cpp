@@ -29,8 +29,7 @@ void ChorusPedal::addParameters (juce::AudioProcessorValueTreeState::ParameterLa
 {
     using Range = juce::NormalisableRange<float>;
 
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::chorusOn, 1 }, "Chorus", false));
+    layout.add (Params::boolParam (ParamID::chorusOn, "Chorus", false));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::chorusRate, 1 }, "Chorus Rate",

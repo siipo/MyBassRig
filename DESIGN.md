@@ -1059,6 +1059,21 @@ reference project above. Consequences:
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.
+- **One unexplained failure, still open.** A Windows CI runner failed "every
+  order produces finite audio" once, on the first rotation, and has not done it
+  again. It does not reproduce: same commit, Visual Studio and Ninja generators
+  both, full suite and filtered, repeatedly green, and Linux and macOS pass it
+  every time. Three explanations were checked and none of them fit -- headroom
+  is 0.07 to 0.27 against a limit of 16, so nothing was close to overflowing;
+  the ADAA lookup tables cannot be read early, because destroying a future from
+  std::async joins it; and every pedal reads its on/off parameter as a
+  threshold, so the LosslessBool change cannot leak a fraction into the audio.
+  It predates the CI work -- the test and the whole signal path are unchanged
+  from the first commit -- so it is a pre-existing intermittent that having CI
+  merely revealed. The test now reports the count, index, channel, block and
+  class of the first non-finite sample, verified by injecting a NaN at a known
+  location, so the next occurrence should arrive with enough to diagnose it.
+  Recorded rather than closed, because it has not been explained.
 - The drive makeup table is calibrated at one reference level, a 220 Hz tone at
   half scale. A much hotter or quieter input will not track it exactly.
 - Attack is asymmetric in effect: +3.2 dB boost against -1.3 dB cut, because the

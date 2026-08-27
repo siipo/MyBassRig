@@ -1,0 +1,11 @@
+# CMake fetches JUCE, chowdsp and Catch2 into here on first configure.
+build/
+
+# Visual Studio / IDE
+.vs/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+.DS_Store

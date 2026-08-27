@@ -118,11 +118,12 @@ jobs:
             Windows) val=pluginval/pluginval.exe ;;
           esac
           chmod +x "$val" || true
-          run_val() {
-            "$val" --strictness-level 10 --repeat "$PLUGINVAL_REPEATS" --randomise \
-                   --timeout-ms 600000 --validate "$ARTEFACTS/VST3/BassRig.vst3"
-          }
-          if [ "${{ runner.os }}" = "Linux" ]; then xvfb-run -a bash -c "$(declare -f run_val); run_val"; else run_val; fi
+          # xvfb-run takes the binary and its arguments directly. Wrapping it
+          # in bash -c does not work: the subshell does not inherit $val, so
+          # the command expanded to nothing and exited 127.
+          prefix=""
+          [ "${{ runner.os }}" = "Linux" ] && prefix="xvfb-run -a"
+          $prefix "$val" --strictness-level 10 --repeat "$PLUGINVAL_REPEATS" --randomise --timeout-ms 600000 --validate "$ARTEFACTS/VST3/BassRig.vst3"
 
       # The pedal face is drawn in code, so a layout regression is otherwise
       # only visible by loading the plugin into a host.

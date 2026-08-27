@@ -1035,6 +1035,153 @@ not claim the number is right.
 ---
 
 
+## 3r. Growl garbled the sound, and it was not the divider
+
+Reported from playing: "if I set growl too high it tends to garble sound". The
+third fault found this way, and the third that no test had.
+
+### Two wrong guesses first
+
+The obvious suspect was section 3q's aliasing: Growl lifts the band above 60 Hz,
+and the off-grid content lives there too, so Growl should be amplifying the
+grit. Measured, and **no** — the off-grid ratio barely moves with Growl. At a
+220 Hz note it goes from −42.78 dB to −42.83 dB across the whole control. The
+hypothesis was tidy and wrong.
+
+The second guess was that the crossover stopped summing flat. Also no.
+
+### What it was
+
+Level. `sub = rumble + pitch * (1 + growl * boost)` with `boost = 3`, and
+nothing holding the total down:
+
+| f0 | peak, growl 0 | peak, growl 1 |
+|---|---|---|
+| 111 Hz | 0.95 | 2.52 |
+| 220 Hz | 1.18 | **4.52** |
+| 439 Hz | 0.93 | 3.69 |
+
+Four and a half times full scale. In the default order the octaver sits ahead of
+the drive, so that arrives at the ADAA clippers thirteen decibels hot, and a
+clipper handed a signal thirteen decibels hot does what it is told. The garbling
+was the drive doing its job on a signal that had no business being that loud.
+
+### A ceiling, not a level match
+
+Holding the power exactly constant was implemented first and it is the wrong
+answer, which the existing audibility test caught immediately. If Growl may only
+redistribute energy, then on a note whose octave already sits mostly above 40 Hz
+there is nothing to redistribute from. Measured audible gain at a 110 Hz note
+fell to **−0.004 dB** — very slightly negative, breaking the one promise the
+control makes, that it can only ever help. Raising `boost` did not rescue it:
+at boost 6, 9 and 12 the number stayed pinned at zero, because normalising the
+power afterwards cancels exactly what the boost added.
+
+So Growl is allowed to add level and simply not allowed to add much. Below the
+ceiling nothing happens at all; the control behaves as it always did.
+
+The ceiling was chosen by measuring both requirements. Audible gain at full
+Growl, against the 6 dB the low strings must get:
+
+| ceiling | 41.2 Hz | 55 Hz | 82.4 Hz | 110 Hz |
+|---|---|---|---|---|
+| 1.2 (+1.6 dB) | 6.38 | 7.01 | 1.89 | 1.58 |
+| **1.4 (+3 dB)** | **7.50** | **8.35** | **3.23** | **2.92** |
+| 1.6 (+4 dB) | 7.50 | 9.06 | 4.37 | 3.60 |
+
+1.2 clears the requirement by 0.38 dB, which is not a margin. 1.4 clears it by
+1.5 dB, and the two lowest notes are identical at 1.4 and 1.6 — their natural
+ratio is already under the ceiling, so it never engages there. **The ceiling
+binds only above the low strings, which is exactly where the level was running
+away and exactly where Growl was never needed.**
+
+Peak at full Growl, before and after: 2.52 → 2.13 at 111 Hz, 4.52 → 1.80 at
+220 Hz, 3.69 → 1.24 at 439 Hz. RMS rise is now 2.91 dB at every note measured,
+against a +3 dB ceiling.
+
+### A smaller thing found on the way
+
+The old form was `rumble + pitch * (1 + growl * boost)`. The new one is
+`shaped + pitch * growl * boost`. Those look equivalent and are not: a
+Linkwitz-Riley crossover is **all-pass complementary**, so its two halves sum to
+flat magnitude but not back to the input. The old form therefore ran the octave
+through an all-pass even at Growl zero — same spectrum, 3.3 dB more crest
+factor, no benefit. The comment claiming the halves "sum back to the octave
+untouched" had been wrong since section 3n and nobody had checked it, because
+nothing downstream of a magnitude measurement can see a phase shift.
+
+Caught only because the growl-zero peak changed when it should not have, and the
+number was worth chasing rather than waving at.
+
+---
+
+
+## 3s. A crash, open
+
+pluginval segfaults in its **"Parameter thread safety"** test. Exit 139, no
+message. It is real, it is rare, and it is not diagnosed.
+
+| | |
+|---|---|
+| Rate, measured | 2 crashes in 16 local runs, plus 1 CI failure — about 12% |
+| Where | always "Parameter thread safety", never anywhere else |
+| Since | at least commit `7914d2f`; the code it touches predates the CI work |
+
+What that test does is set every parameter 500 times from the message thread
+while `processBlock` runs on another, through the VST3 wrapper.
+
+### Ruled out, by checking rather than by argument
+
+- **Allocation on the audio thread.** Audited every pedal's `process()`. None.
+- **Chorus delay-line overrun**, the obvious candidate since it is the only
+  modulated index into a buffer. The LFO is unipolar `[0, 1]` and depth is
+  capped at the allocated headroom, so the read index cannot go negative or past
+  the end.
+- **The chain order.** `processBlock` takes one acquire load of a single atomic
+  word and bounds-checks the nibble it decodes. A concurrent write can only
+  swap one complete permutation for another.
+- **Our processor on its own.** A test that hammers every parameter from a
+  second thread while processing runs clean 12 times out of 12. The VST3
+  wrapper is needed to provoke it, which is why that test is labelled as a smoke
+  test and not as a reproduction.
+
+### A bad inference, recorded
+
+Disabling the two `ValueTree` listeners gave 8 clean runs out of 8, and that was
+written up as having found the cause. It had not. Re-measuring the **unmodified**
+code afterwards gave 0 crashes in 10. At a 12% rate, eight clean runs happens by
+chance about a third of the time, so the original result carried no information
+at all — the baseline was simply never measured.
+
+The lesson is the same one as sections 3b, 3k and 3q, in a new costume: an
+intermittent fault needs a control group before any change to it means anything.
+Three earlier mistakes in this file were measurements of the wrong quantity.
+This one was a measurement of the right quantity with no baseline, which is
+worse, because it looks like evidence.
+
+### Possibly the same thing as 3p's open item
+
+Section 3p records a Windows-only intermittent where the chain stability test
+produced a non-finite sample and never repeated. Same platform, same
+"intermittent, does not reproduce, no explanation". They may well be one fault.
+Recorded as a suspicion, not a finding — there is no evidence linking them
+beyond both being rare and both being on Windows.
+
+### What it would take
+
+A stack trace, not more sampling. A 12% race cannot be bisected by running
+things twice and looking at the answer, which is the mistake above. There is no
+debugger on the machine this was built on, so the route is a small host harness
+that loads the VST3 through `VST3PluginFormat` with JUCE's crash handler
+installed to print a backtrace. Not built yet.
+
+Until then this ships as a known defect, and CI will go red intermittently
+because of it. That is the correct behaviour from CI and it should not be
+papered over by lowering the strictness level or dropping the repeat count.
+
+---
+
+
 ## 4. Fixing what went wrong in Wibeboard
 
 | Wibeboard | BassRig |
@@ -1136,6 +1283,9 @@ reference project above. Consequences:
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.
+- **pluginval crashes intermittently**, about one run in eight, always in its
+  parameter thread safety test. Real, measured, undiagnosed, and it will make CI
+  red at random. See section 3s.
 - **One unexplained failure, still open.** A Windows CI runner failed "every
   order produces finite audio" once, on the first rotation, and has not done it
   again. It does not reproduce: same commit, Visual Studio and Ninja generators

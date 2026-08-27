@@ -23,6 +23,20 @@ fault in the contract with the host, which is not observable from inside.
 pluginval found it on its first ever run. See section 3p of `DESIGN.md` for the
 diagnosis, including the two fixes that were wrong first.
 
+## Fixed: Growl ran away with the level
+
+Reported from playing: turning Growl up "garbles the sound". It was not the
+divider and not aliasing -- both were checked and both were wrong. It was level.
+Growl added up to +12 dB with nothing holding it down, reaching four and a half
+times full scale on a 220 Hz note. The octaver sits ahead of the drive by
+default, so that arrived at the clippers thirteen decibels hot and they did
+exactly what clippers do.
+
+There is now a +3 dB ceiling on the level Growl may add. It engages only above
+the low strings, so the notes Growl exists for behave exactly as before. Peak at
+full Growl drops from 4.52 to 1.80 at 220 Hz, and from 3.69 to 1.24 at 439 Hz.
+See `DESIGN.md` 3r.
+
 ## New
 
 - **macOS and Linux builds**, alongside Windows.
@@ -50,10 +64,17 @@ diagnosis, including the two fixes that were wrong first.
   the neck. It improves only 6 dB per doubling of sample rate, so oversampling
   is a poor trade; see `DESIGN.md` 3q. Whether any of it is audible under a dry
   bass is still an open question, and a listening one.
-- One unexplained intermittent: a Windows CI runner once failed the chain
-  stability test and has not repeated it. It predates this work, does not
-  reproduce anywhere, and three candidate explanations were ruled out by
-  measurement. Recorded as open in `DESIGN.md` rather than quietly closed.
+- **A known crash.** `pluginval` segfaults in its parameter thread safety test
+  about one run in eight -- setting every parameter repeatedly from one thread
+  while audio processes on another. It is real and measured, and it is not
+  diagnosed: allocation on the audio thread, the chorus delay line and the chain
+  ordering have all been ruled out by checking, and the plugin's own processor
+  runs the same test clean, so it needs the VST3 wrapper to provoke. Whether any
+  host actually drives parameters hard enough to hit it is unknown. Disclosed
+  rather than waited out; see `DESIGN.md` 3s.
+- A second unexplained intermittent: a Windows CI runner once failed the chain
+  stability test and has not repeated it. Possibly the same fault as above,
+  though nothing links them beyond both being rare and both on Windows.
 
 ## Licence
 

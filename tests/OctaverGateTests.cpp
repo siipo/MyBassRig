@@ -596,3 +596,72 @@ TEST_CASE ("octaver off-grid energy does not regress", "[octaver][aliasing]")
         REQUIRE (onGrid > 1e-6);
     }
 }
+
+// Reported from playing: "if I set growl too high it tends to garble sound".
+//
+// It was not the divider and it was not aliasing -- the off-grid ratio barely
+// moves with Growl. It was level. Growl adds pitch * growl * boost with nothing
+// holding the total down, which measured as up to four and a half times full
+// scale:
+//
+//     f0        growl 0   growl 1
+//     111 Hz     0.95      2.52
+//     220 Hz     1.18      4.52
+//     439 Hz     0.93      3.69
+//
+// Arriving at the drive's clippers thirteen decibels hot is an instruction to
+// destroy the signal, and that is what was being heard.
+//
+// This test is the report, written down. It says Growl may colour the octave
+// and may not run away with the level.
+TEST_CASE ("growl does not run away with the level", "[octaver][growl]")
+{
+    const auto measure = [] (float note, float growl, float& peak)
+    {
+        Fix<OctaverPedal> f;
+        f.set (ParamID::octOn, 1.0f);
+        f.set (ParamID::octDirect, 0.0f);     // the generated octave alone
+        f.set (ParamID::octSubOne, 1.0f);     // and at full, which is the worst case
+        f.set (ParamID::octGrowl, growl);
+        f.set (ParamID::octTrack, juce::jlimit (90.0f, 600.0f, note * 1.3f));
+        f.prepare();
+
+        constexpr int warmup = 16384;
+        const auto out = f.run (sine (note, warmup + fftSize, 1, 0.6f));
+
+        double sumSq = 0.0;
+        peak = 0.0f;
+
+        for (int n = warmup; n < warmup + fftSize; ++n)
+        {
+            const auto v = out.getSample (0, n);
+            peak = juce::jmax (peak, std::abs (v));
+            sumSq += (double) v * v;
+        }
+
+        return std::sqrt (sumSq / (double) fftSize);
+    };
+
+    for (const auto note : { 111.0f, 220.0f, 439.0f })
+    {
+        float quietPeak = 0.0f, loudPeak = 0.0f;
+
+        const auto quiet = measure (note, 0.0f, quietPeak);
+        const auto loud  = measure (note, 1.0f, loudPeak);
+
+        REQUIRE (quiet > 1.0e-3);   // there is an octave here to begin with
+
+        const auto riseDb = 20.0 * std::log10 (loud / quiet);
+
+        INFO ("note " << note << " Hz: growl 0 -> 1 raises RMS by " << riseDb
+              << " dB, peak " << quietPeak << " -> " << loudPeak);
+
+        // The ceiling is +3 dB. Half a decibel of slack for the follower, which
+        // is deliberately slow and does not settle to the exact ratio.
+        REQUIRE (riseDb < 3.5);
+
+        // And the thing that actually caused the garbling: what arrives at the
+        // next pedal. Four and a half times full scale was the fault.
+        REQUIRE (loudPeak < 2.5f);
+    }
+}

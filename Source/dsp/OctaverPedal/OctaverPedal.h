@@ -45,9 +45,23 @@
 //    It ADDS rather than trades. The first attempt crossfaded between the
 //    fundamental and the harmonics, which helped the low strings by up to 8 dB
 //    but cost 6.6 dB on the notes whose octave was already audible -- it threw
-//    away exactly what those notes needed. Boosting the upper half against an
-//    all-pass complementary crossover means Growl at zero is the untouched
-//    octave, and turning it up can only ever help.
+//    away exactly what those notes needed. Boosting the upper half means Growl
+//    at zero is the untouched octave, and turning it up can only ever help.
+//
+//    What it may not do is run away with the level, which it did: reported from
+//    playing as garbling, and measured at four and a half times full scale on a
+//    220 Hz note at full Growl, which arrives at the drive's clippers thirteen
+//    decibels hot. There is now a ceiling of +3 dB on the level Growl may add.
+//    It binds only above the low strings -- the notes Growl exists for never
+//    reach it -- so the control is unchanged where it earns its keep. See
+//    DESIGN.md 3r.
+//
+//    Note also that the boost is applied as shaped + pitch * growl * boost, not
+//    as rumble + pitch * (1 + growl * boost). Those differ: a Linkwitz-Riley
+//    crossover is all-pass complementary, so its two halves sum to flat
+//    MAGNITUDE but not back to the input. The old form therefore all-passed the
+//    octave even at Growl zero, for no benefit and 3.3 dB of extra crest
+//    factor.
 class OctaverPedal final : public Pedal
 {
 public:
@@ -88,6 +102,11 @@ private:
 
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> directGain, subOneGain,
                                                                   subTwoGain, growlAmount;
+
+    // Running levels of the octave before and after the Growl boost, so the
+    // boost can be level matched. See the note in the .cpp.
+    float growlPlainLevel = 0.0f;
+    float growlBoostedLevel = 0.0f;
 
     float envelope = 0.0f;
     int envelopeHold = 0;    // keeps the follower from rippling at bass frequencies

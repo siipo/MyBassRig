@@ -48,6 +48,39 @@ namespace
     // of trading means the control can only ever help.
     constexpr float growlBoost = 3.0f;
 
+    // Time constant for the Growl level match. Long enough that it follows the
+    // note rather than the waveform -- at 80 ms it is well below the lowest
+    // octave the divider produces -- and short enough to settle early in a note.
+    constexpr float growlLevelMs = 80.0f;
+
+    // Below this the octave is silent and the ratio is noise over noise. In
+    // mean-square terms, so it is the square of a level.
+    constexpr float growlLevelFloor = 1.0e-10f;
+
+    // The most level Growl may add, whatever the note: +3 dB.
+    //
+    // Chosen by measuring both things it has to satisfy. Audible gain at full
+    // Growl, against the 6 dB the low strings are required to get:
+    //
+    //     ceiling   41.2 Hz   55 Hz   82.4 Hz   110 Hz
+    //     1.2        6.38     7.01     1.89      1.58
+    //     1.4        7.50     8.35     3.23      2.92
+    //     1.6        7.50     9.06     4.37      3.60
+    //
+    // 1.2 clears the requirement by 0.38 dB, which is not a margin. 1.4 clears
+    // it by 1.5 dB and leaves the two lowest notes untouched -- their natural
+    // ratio is already under 1.4, so the ceiling never engages there and Growl
+    // does exactly what it did before. It only binds further up the neck, which
+    // is where the level was running away.
+    //
+    // Peak at full Growl, before and after:
+    //
+    //     f0        was      now
+    //     111 Hz    2.52     2.13
+    //     220 Hz    4.52     1.80
+    //     439 Hz    3.69     1.24
+    constexpr float growlMaxGain = 1.4f;
+
     float onePoleCoeff (float milliseconds, double sampleRate) noexcept
     {
         return std::exp (-1.0f / (0.001f * juce::jmax (0.01f, milliseconds) * (float) sampleRate));
@@ -141,6 +174,8 @@ void OctaverPedal::reset()
     subBuffer.clear();
 
     envelope = 0.0f;
+    growlPlainLevel = 0.0f;
+    growlBoostedLevel = 0.0f;
     envelopeHold = 0;
     squelchedFor = 0;
     live = false;
@@ -173,6 +208,8 @@ void OctaverPedal::process (juce::dsp::AudioBlock<float>& block)
     subOneGain.setTargetValue (subOneParam->load());
     subTwoGain.setTargetValue (subTwoParam->load());
     growlAmount.setTargetValue (growlParam->load());
+
+    const auto growlLevelCoeff = 1.0f - onePoleCoeff (growlLevelMs, sampleRate);
 
     const auto envAttack  = onePoleCoeff (envelopeAttackMs, sampleRate);
     const auto envRelease = onePoleCoeff (envelopeReleaseMs, sampleRate);
@@ -275,7 +312,52 @@ void OctaverPedal::process (juce::dsp::AudioBlock<float>& block)
         growlCrossover.processSample (0, shaped, rumble, pitch);
 
         const auto growl = growlAmount.getNextValue();
-        const auto sub = rumble + pitch * (1.0f + growl * growlBoost);
+
+        // rumble + pitch is exactly `shaped` again, so boosting the upper half
+        // is the same as adding pitch * growl * boost to the whole octave.
+        const auto boosted = shaped + pitch * growl * growlBoost;
+
+        // ...and that addition is up to +12 dB of LEVEL, not just of harmonics.
+        // Measured with the octave alone: peak went from 1.18 to 4.52 at a
+        // 110 Hz octave as Growl was swept, and 0.93 to 3.69 at 220 Hz. Four and
+        // a half times full scale arrives at the drive's clippers as an
+        // instruction to destroy the signal, which is what "turning Growl up
+        // garbles it" was.
+        //
+        // How much level it adds depends on the note, because the share of the
+        // octave sitting above the 60 Hz crossover does: about 0.55 of it at a
+        // 56 Hz octave, essentially all of it at 220 Hz. So a fixed makeup
+        // taper cannot fix this the way the drive's does -- it would be right
+        // for one note and wrong either side of it.
+        //
+        // Level matching against the unboosted octave handles every note with
+        // one rule, and turns Growl into what it was always described as: a
+        // control over where the octave's energy sits, not how much of it there
+        // is. The follower is slow enough not to chase the waveform and fast
+        // enough to settle within a note.
+        // Mean SQUARE, not mean absolute. Boosting the harmonics makes the
+        // waveform spikier, and for a spikier wave those two diverge -- matching
+        // the rectified average left RMS drifting up 2.5 dB across the control.
+        // Matching power holds loudness where it should be.
+        growlPlainLevel   += growlLevelCoeff * (shaped  * shaped  - growlPlainLevel);
+        growlBoostedLevel += growlLevelCoeff * (boosted * boosted - growlBoostedLevel);
+
+        // A ceiling, not a level match. Holding the power exactly constant was
+        // tried first and is wrong: Growl can then only REDISTRIBUTE energy, so
+        // on a note whose octave already sits mostly above 40 Hz there is
+        // nothing to redistribute from, and the measured audible gain fell to
+        // -0.004 dB. A control described as one that can only ever help must
+        // not go negative anywhere.
+        //
+        // So Growl is allowed to add level, and simply not allowed to add more
+        // than growlMaxGain of it. Below the ceiling nothing happens at all and
+        // the control behaves exactly as it always did.
+        const auto plainLevel = juce::jmax (growlPlainLevel, growlLevelFloor);
+        const auto ratio = std::sqrt (juce::jmax (growlBoostedLevel, 0.0f) / plainLevel);
+
+        const auto compensation = ratio > growlMaxGain ? growlMaxGain / ratio : 1.0f;
+
+        const auto sub = boosted * compensation;
 
         const auto direct = directGain.getNextValue();
 

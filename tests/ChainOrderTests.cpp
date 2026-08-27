@@ -341,3 +341,59 @@ TEST_CASE ("every order produces finite audio", "[chain][stability]")
         REQUIRE (peak < 16.0f);
     }
 }
+
+// Concurrent automation against a running audio thread.
+//
+// Written to reproduce the segfault pluginval hits in its "Parameter thread
+// safety" test, and it does NOT: 12 runs of this, clean, against a crash that
+// happens roughly one pluginval run in eight. It is kept as a cheap smoke test
+// for the path, not as a reproduction, and it must not be read as covering that
+// crash. The difference is almost certainly the VST3 wrapper, which pluginval
+// drives and this does not -- so whatever is wrong is either in the wrapper's
+// parameter handling or in how it reaches ours. See DESIGN.md 3s.
+TEST_CASE ("parameters can be hammered while audio is processing", "[threading]")
+{
+    juce::ScopedJuceInitialiser_GUI juceInit;
+
+    BassRigProcessor proc;
+    constexpr int blockSize = 32;
+    proc.prepareToPlay (44100.0, blockSize);
+
+    auto params = proc.getParameters();
+    REQUIRE (! params.isEmpty());
+
+    constexpr int numBlocks = 500;
+    std::atomic<bool> go { false };
+
+    std::thread setter ([&]
+    {
+        juce::Random r (1234);
+        while (! go.load()) {}
+
+        for (int i = 0; i < numBlocks; ++i)
+            for (auto* p : params)
+                p->setValueNotifyingHost (r.nextFloat());
+    });
+
+    const auto channels = juce::jmax (proc.getTotalNumInputChannels(),
+                                      proc.getTotalNumOutputChannels());
+    juce::AudioBuffer<float> buffer (juce::jmax (1, channels), blockSize);
+    juce::MidiBuffer midi;
+
+    go.store (true);
+
+    for (int i = 0; i < numBlocks; ++i)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int n = 0; n < blockSize; ++n)
+                buffer.setSample (ch, n, 0.25f * std::sin (0.05f * (float) (i * blockSize + n)));
+
+        proc.processBlock (buffer, midi);
+    }
+
+    setter.join();
+
+    // Getting here at all is the assertion. The output is not checked: random
+    // parameter values legitimately produce anything.
+    SUCCEED ("survived");
+}

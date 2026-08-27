@@ -55,6 +55,41 @@ thread. Behaviour is unchanged for anything already on that thread. This is an
 upstream bug and will be reported there; see `DESIGN.md` 3s for the diagnosis,
 including the two attempts that were wrong first.
 
+## Rebuilt: the octaver
+
+The old octaver was an analogue-style flip-flop divider. It measured correctly
+at every pitch and it sounded bad, in three ways that were all structural rather
+than tuning: a hard square switched on the nearest sample boundary was gritty; a
+flip-flop has memory, so one spurious crossing inverted the division and it
+STAYED inverted; and the octave was literally `square x envelope`, so its
+dynamics were the envelope's and nothing else's.
+
+It is now a period tracker driving a phase-locked oscillator. Crossings are
+timed rather than counted, so a lone glitch moves an estimate slightly instead
+of flipping a state permanently, and there is no state left that can be stuck in
+the wrong half. The waveform is a sine plus chosen harmonics, so every partial
+sits at a frequency the plugin picked and nothing folds:
+
+| note | before | after | |
+|---|---|---|---|
+| 111 Hz | -38.9 dB | **-59.7 dB** | 20.8 dB cleaner |
+| 220 Hz | -35.6 dB | **-55.3 dB** | 19.7 dB cleaner |
+| 439 Hz | -32.5 dB | **-49.3 dB** | 16.8 dB cleaner |
+
+Growl now sets harmonic content directly instead of boosting a crossover band,
+so the level compensation the previous design needed is gone -- the most Growl
+can move the level is 2.3 dB, by construction.
+
+Fixed alongside it: a crackle as notes faded out, caused by the octave's
+amplitude being gated by a boolean. The old design had the identical gate and
+nobody ever heard it, because a hard square is already nothing but
+discontinuities. Cleaning up the waveform uncovered a fault that had been
+shipping since the first release rather than introducing a new one.
+
+All eleven octaver tests were written against behaviour rather than
+implementation, so the entire architecture was replaced with every one of them
+still passing.
+
 ## New
 
 - **macOS and Linux builds**, alongside Windows.
@@ -65,7 +100,8 @@ including the two attempts that were wrong first.
   five and a single green run proves very little.
 - SHA256SUMS.txt for the archives.
 - A regression test pinning the octaver's off-grid energy, so the number is
-  visible if it ever moves.
+  visible if it ever moves, and another asserting it does not click as a note
+  decays.
 
 ## Known limitations
 
@@ -76,12 +112,8 @@ including the two attempts that were wrong first.
 - The voicing has not been A/B'd against reference hardware. It has been played,
   and two bugs in `DESIGN.md` were found that way, but the values are chosen to
   be measurably distinct rather than demonstrably good.
-- The octaver synthesises its square by hard switching at base rate, with no
-  band limiting. Measured this release: -32 to -44 dB of non-harmonic content
-  depending on the note and the tone setting, worsening about 3 dB per octave up
-  the neck. It improves only 6 dB per doubling of sample rate, so oversampling
-  is a poor trade; see `DESIGN.md` 3q. Whether any of it is audible under a dry
-  bass is still an open question, and a listening one.
+- The octaver is monophonic and will stumble on chords and double stops. That is
+  what an octaver of this kind does, and it is not a defect being worked around.
 - One unexplained intermittent: a Windows CI runner once failed the chain
   stability test and has not repeated it. It may have been the crash fixed
   above, since heap corruption can surface as a bad sample as easily as a

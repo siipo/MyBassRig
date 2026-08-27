@@ -4,82 +4,79 @@ namespace
 {
     constexpr double smoothingSeconds = 0.02;
 
-    // Below this the comparator is looking at noise rather than a note, and the
-    // flip-flops would free-run and warble out of silence.
-    //
-    // Two thresholds, not one. A single one flickered every cycle as a note
-    // decayed past it, and each flicker reset the flip-flops mid-note, which
-    // scrambled the division and sounded like the octave jumping up.
-    //
-    // This and the two guards below are deliberately redundant. Tested by
-    // reverting them one at a time: the fault needs ALL THREE weaknesses at
-    // once, and any single one of these prevents it. None of them is "the" fix,
-    // so none of them should be removed as unnecessary on the grounds that the
-    // others cover it.
+    // Below this the detector is looking at noise rather than a note. Two
+    // thresholds, not one: a single one flickered every cycle as a note decayed
+    // past it. It matters far less than it used to -- a flicker now mutes for a
+    // moment instead of scrambling a divider -- but a control that chatters is
+    // still worse than one that does not.
     constexpr float squelchOpenGain = 0.004f;    // about -48 dBFS
     constexpr float squelchCloseGain = 0.0018f;  // about -55 dBFS
 
-    // How long the input has to stay squelched before the flip-flops are reset.
-    // Resetting is right at the start of a NEW note and wrong in the middle of a
-    // decaying one.
-    constexpr float squelchResetMs = 120.0f;
-
-    // The envelope follower holds its peak for longer than one cycle of the
-    // lowest note. Without this it ripples 67% per cycle at 41 Hz -- against 8%
-    // at 220 Hz -- and everything downstream that scales with it inherits that
-    // ripple. This is why the fault got worse the lower the note.
+    // The envelope holds its peak for longer than one cycle of the lowest note.
+    // Without it the follower ripples 67% per cycle at 41 Hz against 8% at
+    // 220 Hz, and everything scaled by it inherits that.
     constexpr float envelopeHoldMs = 40.0f;
 
-    // The comparator ignores crossings this close to zero, so the ripple on a
-    // decaying note does not trigger extra edges and drop the octave an extra
-    // octave.
-    constexpr float comparatorHysteresis = 0.08f;
+    constexpr float envelopeAttackMs = 6.0f;
+    constexpr float envelopeReleaseMs = 90.0f;
 
-    constexpr float envelopeAttackMs = 3.0f;
-    constexpr float envelopeReleaseMs = 60.0f;
+    // Crossings closer to zero than this are ignored, so ripple on a decaying
+    // note does not manufacture extra ones.
+    constexpr float crossingHysteresis = 0.08f;
 
-    // Where the octave stops being felt and starts being heard.
-    constexpr float growlCrossoverHz = 60.0f;
+    // The band the tracker will believe. 24 Hz is below a five-string B and
+    // 800 Hz is above anything worth an octave pedal; a reading outside this is
+    // noise, not a note.
+    constexpr float lowestTrackedHz  = 24.0f;
+    constexpr float highestTrackedHz = 800.0f;
 
-    // How much Growl can lift the audible half. Additive rather than a
-    // crossfade, and that distinction is load bearing: a crossfade at full
-    // Growl DISCARDS the low half, which measured -6.6 dB of audible energy on
-    // the notes whose octave was already above the crossover. Boosting instead
-    // of trading means the control can only ever help.
-    constexpr float growlBoost = 3.0f;
+    // How far a new reading may sit from the running estimate and still be
+    // treated as the same note. Vibrato and a decaying note move the period by a
+    // few percent; an octave error moves it by 50% or 100%, so there is a wide
+    // gap to put the line in.
+    constexpr float periodTolerance = 0.35f;
 
-    // Time constant for the Growl level match. Long enough that it follows the
-    // note rather than the waveform -- at 80 ms it is well below the lowest
-    // octave the divider produces -- and short enough to settle early in a note.
-    constexpr float growlLevelMs = 80.0f;
+    // ...and how closely two consecutive disagreeing readings must match each
+    // other before the tracker accepts that the note really has changed. This is
+    // what stops one bad crossing moving the pitch, while still letting a
+    // genuine new note through in two cycles -- 25 ms at the bottom of the neck.
+    constexpr float candidateTolerance = 0.12f;
+    constexpr int   agreementsForNewNote = 2;
 
-    // Below this the octave is silent and the ratio is noise over noise. In
-    // mean-square terms, so it is the square of a level.
-    constexpr float growlLevelFloor = 1.0e-10f;
+    // How quickly the accepted period is followed. Fast enough to settle inside
+    // a note, slow enough that a single odd reading barely moves it.
+    constexpr float periodSmoothing = 0.25f;
 
-    // The most level Growl may add, whatever the note: +3 dB.
+    // How much of the measured phase error each crossing decides to correct.
+    constexpr float phaseLockStrength = 0.25f;
+
+    // ...and over how long that correction is then paid back. Applying it at the
+    // moment of the crossing moves the waveform's value in one step, which is a
+    // click -- the same class of fault as the boolean gate below, and audible
+    // for the same reason once the waveform became smooth enough to hear it
+    // against. Spread over 15 ms it is a small change of rate instead.
+    constexpr float phaseCorrectionMs = 15.0f;
+
+    // With no believable crossing for this long, the note is over as far as the
+    // tracker is concerned.
+    constexpr float trackingHoldMs = 120.0f;
+
+    // How quickly the octave arrives and leaves once the tracker has an opinion.
+    // These exist because the amplitude used to be gated by a boolean, which
+    // stepped the waveform by its entire amplitude every time tracking dropped
+    // or came back. On a decaying note that happens over and over, and every one
+    // of those steps is a click.
     //
-    // Chosen by measuring both things it has to satisfy. Audible gain at full
-    // Growl, against the 6 dB the low strings are required to get:
-    //
-    //     ceiling   41.2 Hz   55 Hz   82.4 Hz   110 Hz
-    //     1.2        6.38     7.01     1.89      1.58
-    //     1.4        7.50     8.35     3.23      2.92
-    //     1.6        7.50     9.06     4.37      3.60
-    //
-    // 1.2 clears the requirement by 0.38 dB, which is not a margin. 1.4 clears
-    // it by 1.5 dB and leaves the two lowest notes untouched -- their natural
-    // ratio is already under 1.4, so the ceiling never engages there and Growl
-    // does exactly what it did before. It only binds further up the neck, which
-    // is where the level was running away.
-    //
-    // Peak at full Growl, before and after:
-    //
-    //     f0        was      now
-    //     111 Hz    2.52     2.13
-    //     220 Hz    4.52     1.80
-    //     439 Hz    3.69     1.24
-    constexpr float growlMaxGain = 1.4f;
+    // Opening is quick enough not to soften a pluck. Closing is slow enough that
+    // the ear reads it as the note ending rather than as an edit.
+    constexpr float gateOpenMs  = 4.0f;
+    constexpr float gateCloseMs = 30.0f;
+
+    // How loud the second and third harmonics get at full Growl, relative to the
+    // fundamental. Chosen so the top of the control reads as growl rather than
+    // as a different instrument.
+    constexpr float growlSecond = 0.7f;
+    constexpr float growlThird  = 0.45f;
 
     float onePoleCoeff (float milliseconds, double sampleRate) noexcept
     {
@@ -109,20 +106,20 @@ void OctaverPedal::addParameters (juce::AudioProcessorValueTreeState::ParameterL
     layout.add (Params::percentParam (ParamID::octSubOne, "Octave 1", 0.6f));
     layout.add (Params::percentParam (ParamID::octSubTwo, "Octave 2", 0.0f));
 
-    // A raw square is unpleasant, so the generated octaves are rounded off.
+    // Gentler than it was, and default higher, because there is no longer a
+    // square edge that has to be hidden.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::octTone, 1 }, "Octave Tone",
-        Range { 150.0f, 4000.0f, 1.0f, 0.4f }, 700.0f,
+        Range { 150.0f, 4000.0f, 1.0f, 0.4f }, 1200.0f,
         juce::AudioParameterFloatAttributes().withLabel ("Hz")));
 
     // How much of the octave is carried by its harmonics rather than its
-    // fundamental. See the note in the header: below the A on the E string,
-    // most of a pure octave is under 40 Hz and inaudible on most speakers.
+    // fundamental. An octave below the low strings lands under 40 Hz, where most
+    // speakers give up; its harmonics do not. See the note in the header.
     layout.add (Params::percentParam (ParamID::octGrowl, "Growl", 0.35f));
 
-    // Exposed because where the fundamental sits depends on how far up the neck
-    // you are: too high and the comparator sees harmonics and jumps an octave,
-    // too low and open strings stop tracking at all.
+    // Where the detector stops looking. Too high and it times harmonics instead
+    // of the fundamental, too low and open strings stop being seen at all.
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::octTrack, 1 }, "Tracking",
         Range { 90.0f, 600.0f, 1.0f, 0.5f }, 250.0f,
@@ -145,14 +142,6 @@ void OctaverPedal::prepare (const juce::dsp::ProcessSpec& spec)
     toneFilter.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
     toneFilter.setCutoffFrequency (toneParam->load());
 
-    // All-pass complementary, so at Growl centred the two halves sum back to
-    // the octave unaltered rather than notching it.
-    growlCrossover.prepare (spec);
-    growlCrossover.setType (juce::dsp::LinkwitzRileyFilterType::lowpass);
-    growlCrossover.setCutoffFrequency (growlCrossoverHz);
-
-    subBuffer.setSize (numChannels, static_cast<int> (spec.maximumBlockSize));
-
     directGain.reset (spec.sampleRate, smoothingSeconds);
     directGain.setCurrentAndTargetValue (directParam->load());
     subOneGain.reset (spec.sampleRate, smoothingSeconds);
@@ -170,18 +159,22 @@ void OctaverPedal::reset()
     trackingFilterA.reset();
     trackingFilterB.reset();
     toneFilter.reset();
-    growlCrossover.reset();
-    subBuffer.clear();
 
-    envelope = 0.0f;
-    growlPlainLevel = 0.0f;
-    growlBoostedLevel = 0.0f;
-    envelopeHold = 0;
-    squelchedFor = 0;
-    live = false;
     above = false;
-    flipOne = false;
-    flipTwo = false;
+    samplesSinceCrossing = 0;
+    trackedPeriod = 0.0f;
+    candidatePeriod = 0.0f;
+    agreeingReadings = 0;
+    samplesSinceValid = 0;
+
+    phase = 0.0f;
+    oscPeriod = 0.0f;
+    pitchGate = 0.0f;
+    pendingPhaseCorrection = 0.0f;
+    envelope = 0.0f;
+    envelopeHold = 0;
+    live = false;
+
     tracking.store (false, std::memory_order_relaxed);
 }
 
@@ -209,19 +202,23 @@ void OctaverPedal::process (juce::dsp::AudioBlock<float>& block)
     subTwoGain.setTargetValue (subTwoParam->load());
     growlAmount.setTargetValue (growlParam->load());
 
-    const auto growlLevelCoeff = 1.0f - onePoleCoeff (growlLevelMs, sampleRate);
-
-    const auto envAttack  = onePoleCoeff (envelopeAttackMs, sampleRate);
-    const auto envRelease = onePoleCoeff (envelopeReleaseMs, sampleRate);
+    const auto envAttack   = onePoleCoeff (envelopeAttackMs, sampleRate);
+    const auto envRelease  = onePoleCoeff (envelopeReleaseMs, sampleRate);
     const auto holdSamples = juce::roundToInt (envelopeHoldMs * 0.001 * sampleRate);
-    const auto resetSamples = juce::roundToInt (squelchResetMs * 0.001 * sampleRate);
+    const auto trackHold   = juce::roundToInt (trackingHoldMs * 0.001 * sampleRate);
+    const auto gateOpen    = 1.0f - onePoleCoeff (gateOpenMs, sampleRate);
+    const auto gateClose   = 1.0f - onePoleCoeff (gateCloseMs, sampleRate);
+    const auto phaseCorrectionRate = 1.0f - onePoleCoeff (phaseCorrectionMs, sampleRate);
+
+    const auto longestPeriod  = (float) sampleRate / lowestTrackedHz;
+    const auto shortestPeriod = (float) sampleRate / highestTrackedHz;
 
     bool trackedThisBlock = false;
 
     for (int i = 0; i < numSamples; ++i)
     {
-        // The divider is monophonic by nature, so it runs off a mono sum. Two
-        // channels dividing independently would produce two different octaves.
+        // The tracker is monophonic by nature, so it runs off a mono sum. Two
+        // channels tracked independently would produce two different octaves.
         float summed = 0.0f;
 
         for (int ch = 0; ch < blockChannels; ++ch)
@@ -229,13 +226,11 @@ void OctaverPedal::process (juce::dsp::AudioBlock<float>& block)
 
         summed /= (float) blockChannels;
 
-        const auto tracked = trackingFilterB.processSample (0, trackingFilterA.processSample (0, summed));
-
+        const auto detected = trackingFilterB.processSample (0, trackingFilterA.processSample (0, summed));
         const auto rectified = std::abs (summed);
 
-        // Peak with hold, not a plain one-pole. The hold spans more than one
-        // cycle of the lowest note, so the envelope is smooth rather than
-        // rippling at the note frequency.
+        // Peak with hold rather than a plain one-pole, so the envelope is smooth
+        // rather than rippling at the note frequency.
         if (rectified > envelope)
         {
             envelope = rectified + envAttack * (envelope - rectified);
@@ -250,114 +245,167 @@ void OctaverPedal::process (juce::dsp::AudioBlock<float>& block)
             envelope = rectified + envRelease * (envelope - rectified);
         }
 
-        // Hysteresis, so a decaying note does not flicker in and out.
         if (! live && envelope > squelchOpenGain)
             live = true;
         else if (live && envelope < squelchCloseGain)
             live = false;
 
-        if (! live)
+        // ---- detect ------------------------------------------------------
+        ++samplesSinceCrossing;
+        ++samplesSinceValid;
+
+        const auto threshold = crossingHysteresis * envelope;
+
+        if (live && ! above && detected > threshold)
         {
-            // Only reset once the input has been quiet for a while. Resetting is
-            // right at the start of a new note and wrong partway through a
-            // decaying one -- doing it immediately is what broke the division.
-            if (squelchedFor < resetSamples)
+            above = true;
+
+            const auto reading = (float) samplesSinceCrossing;
+            samplesSinceCrossing = 0;
+
+            if (reading >= shortestPeriod && reading <= longestPeriod)
             {
-                ++squelchedFor;
+                if (trackedPeriod <= 0.0f)
+                {
+                    // First believable reading of a note: take it whole rather
+                    // than easing towards it from nothing.
+                    trackedPeriod = reading;
+                    samplesSinceValid = 0;
+                }
+                else if (std::abs (reading - trackedPeriod) <= periodTolerance * trackedPeriod)
+                {
+                    trackedPeriod += periodSmoothing * (reading - trackedPeriod);
+                    agreeingReadings = 0;
+                    samplesSinceValid = 0;
+                }
+                else
+                {
+                    // Disagrees with what we are tracking. That is either a new
+                    // note or a bad crossing, and the difference is whether it
+                    // happens twice in a row the same way. This is where the old
+                    // design lost -- it acted on every crossing, so a single bad
+                    // one changed the octave for good.
+                    if (candidatePeriod > 0.0f
+                        && std::abs (reading - candidatePeriod) <= candidateTolerance * candidatePeriod)
+                    {
+                        if (++agreeingReadings >= agreementsForNewNote)
+                        {
+                            trackedPeriod = reading;
+                            agreeingReadings = 0;
+                            candidatePeriod = 0.0f;
+                            samplesSinceValid = 0;
+                        }
+                    }
+                    else
+                    {
+                        candidatePeriod = reading;
+                        agreeingReadings = 1;
+                    }
+                }
             }
-            else
+
+            // ---- lock ----------------------------------------------------
+            // One input cycle is half a turn of the first octave down, so every
+            // crossing should land on a multiple of 0.5. Pull towards the
+            // nearest one rather than snapping, which keeps it locked without a
+            // click and without ever having to decide WHICH half it is in --
+            // the ambiguity the flip-flop used to get stuck in.
+            if (trackedPeriod > 0.0f)
             {
-                above = false;
-                flipOne = false;
-                flipTwo = false;
+                const auto nearest = std::round (phase * 2.0f) * 0.5f;
+                pendingPhaseCorrection += phaseLockStrength * (nearest - phase);
             }
         }
-        else
+        else if (above && detected < -threshold)
         {
-            squelchedFor = 0;
+            above = false;
+        }
+
+        if (! live || samplesSinceValid > trackHold)
+        {
+            trackedPeriod = 0.0f;
+            candidatePeriod = 0.0f;
+            agreeingReadings = 0;
+        }
+
+        // ---- generate ----------------------------------------------------
+        const auto hasPitch = trackedPeriod > 0.0f && live;
+
+        if (hasPitch)
+        {
             trackedThisBlock = true;
-
-            const auto threshold = comparatorHysteresis * envelope;
-
-            if (! above && tracked > threshold)
-            {
-                above = true;
-
-                // Rising edge: divide by two, and the second flip-flop divides
-                // that again.
-                flipOne = ! flipOne;
-
-                if (flipOne)
-                    flipTwo = ! flipTwo;
-            }
-            else if (above && tracked < -threshold)
-            {
-                above = false;
-            }
+            oscPeriod = trackedPeriod;
         }
 
-        // The squares follow the playing dynamics, which is what stops the
-        // octave sounding like a synth bolted on top.
-        const auto shape = live ? envelope : 0.0f;
-        const auto one = (flipOne ? 1.0f : -1.0f) * shape;
-        const auto two = (flipTwo ? 1.0f : -1.0f) * shape;
+        // Keep running while the gate closes. Freezing the phase instead would
+        // hold the waveform at whatever value it happened to stop on and fade
+        // THAT out, which is a decaying DC offset rather than a note ending.
+        if (oscPeriod > 0.0f)
+        {
+            // Half the input frequency, and the accumulator wraps at 2 so the
+            // second octave down is one turn in two.
+            phase += 1.0f / (2.0f * oscPeriod);
 
-        const auto shaped = toneFilter.processSample (0, one * subOneGain.getNextValue()
-                                                          + two * subTwoGain.getNextValue());
+            // Work off any outstanding lock error as a rate change rather than a
+            // jump. Over 15 ms this is far below the oscillator's own rate, so
+            // it pulls into alignment without ever moving the waveform.
+            const auto correction = pendingPhaseCorrection * phaseCorrectionRate;
+            phase += correction;
+            pendingPhaseCorrection -= correction;
 
-        // Lift the octave's harmonics without giving up its fundamental. At
-        // Growl zero the two halves sum back to the octave untouched, because
-        // the crossover is all-pass complementary.
-        float rumble = 0.0f, pitch = 0.0f;
-        growlCrossover.processSample (0, shaped, rumble, pitch);
+            while (phase >= 2.0f)
+                phase -= 2.0f;
+
+            while (phase < 0.0f)
+                phase += 2.0f;
+        }
+
+        const auto gateTarget = hasPitch ? 1.0f : 0.0f;
+        pitchGate += (hasPitch ? gateOpen : gateClose) * (gateTarget - pitchGate);
 
         const auto growl = growlAmount.getNextValue();
+        const auto shape = envelope * pitchGate;
 
-        // rumble + pitch is exactly `shaped` again, so boosting the upper half
-        // is the same as adding pitch * growl * boost to the whole octave.
-        const auto boosted = shaped + pitch * growl * growlBoost;
-
-        // ...and that addition is up to +12 dB of LEVEL, not just of harmonics.
-        // Measured with the octave alone: peak went from 1.18 to 4.52 at a
-        // 110 Hz octave as Growl was swept, and 0.93 to 3.69 at 220 Hz. Four and
-        // a half times full scale arrives at the drive's clippers as an
-        // instruction to destroy the signal, which is what "turning Growl up
-        // garbles it" was.
+        // Harmonic amplitudes are chosen, not produced by clipping, so nothing
+        // is generated above where it belongs and nothing can fold.
         //
-        // How much level it adds depends on the note, because the share of the
-        // octave sitting above the 60 Hz crossover does: about 0.55 of it at a
-        // 56 Hz octave, essentially all of it at 220 Hz. So a fixed makeup
-        // taper cannot fix this the way the drive's does -- it would be right
-        // for one note and wrong either side of it.
+        // They are deliberately NOT normalised to constant power. Exact
+        // normalisation was written first and measured wrong: on a note whose
+        // octave already sits above 40 Hz it makes Growl add exactly zero
+        // audible energy -- -0.0003 dB at a 110 Hz note -- because there is
+        // nothing left to redistribute from, which breaks the one promise the
+        // control makes.
         //
-        // Level matching against the unboosted octave handles every note with
-        // one rule, and turns Growl into what it was always described as: a
-        // control over where the octave's energy sits, not how much of it there
-        // is. The follower is slow enough not to chase the waveform and fast
-        // enough to settle within a note.
-        // Mean SQUARE, not mean absolute. Boosting the harmonics makes the
-        // waveform spikier, and for a spikier wave those two diverge -- matching
-        // the rectified average left RMS drifting up 2.5 dB across the control.
-        // Matching power holds loudness where it should be.
-        growlPlainLevel   += growlLevelCoeff * (shaped  * shaped  - growlPlainLevel);
-        growlBoostedLevel += growlLevelCoeff * (boosted * boosted - growlBoostedLevel);
-
-        // A ceiling, not a level match. Holding the power exactly constant was
-        // tried first and is wrong: Growl can then only REDISTRIBUTE energy, so
-        // on a note whose octave already sits mostly above 40 Hz there is
-        // nothing to redistribute from, and the measured audible gain fell to
-        // -0.004 dB. A control described as one that can only ever help must
-        // not go negative anywhere.
+        // It is not needed either. The old design boosted a whole crossover
+        // band by four and ran away by 12 dB, so it had to be reined in with a
+        // follower and a ceiling (DESIGN.md 3r). Here the amplitudes are chosen,
+        // so the worst the level can rise is
         //
-        // So Growl is allowed to add level, and simply not allowed to add more
-        // than growlMaxGain of it. Below the ceiling nothing happens at all and
-        // the control behaves exactly as it always did.
-        const auto plainLevel = juce::jmax (growlPlainLevel, growlLevelFloor);
-        const auto ratio = std::sqrt (juce::jmax (growlBoostedLevel, 0.0f) / plainLevel);
+        //     sqrt(1 + 0.7^2 + 0.45^2) = 1.30,  i.e. 2.3 dB
+        //
+        // at full Growl, bounded by construction and comfortably inside the
+        // 3 dB the old design had to work to achieve.
+        const auto second = growl * growlSecond;
+        const auto third  = growl * growlThird;
 
-        const auto compensation = ratio > growlMaxGain ? growlMaxGain / ratio : 1.0f;
+        const auto twoPi = juce::MathConstants<float>::twoPi;
 
-        const auto sub = boosted * compensation;
+        const auto voice = [&] (float turnsPerCycle)
+        {
+            const auto p = phase / turnsPerCycle;
+
+            return std::sin (twoPi * p)
+                    + second * std::sin (twoPi * 2.0f * p)
+                    + third  * std::sin (twoPi * 3.0f * p);
+        };
+
+        // One turn of the accumulator is a cycle of the first octave down; two
+        // turns are a cycle of the second.
+        const auto one = shape * voice (1.0f);
+        const auto two = shape * voice (2.0f);
+
+        const auto sub = toneFilter.processSample (0, one * subOneGain.getNextValue()
+                                                        + two * subTwoGain.getNextValue());
 
         const auto direct = directGain.getNextValue();
 

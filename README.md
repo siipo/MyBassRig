@@ -14,7 +14,7 @@ turned down.
 |---|---|
 | **Noise gate** | Sidechain-filtered key, hysteresis, and a hold long enough to survive the ripple in a plucked bass envelope |
 | **Compressor** | Sidechain high-pass, so a low B does not pump the whole band. Off it pulls 20 dB of gain reduction from a fundamental that should not be driving the detector at all |
-| **Octaver** | Analogue-style frequency divider rather than a pitch tracker, because tracking a 31 Hz note costs 60 ms. A Growl control lifts the octave's harmonics, since an octave below the low strings is mostly under 40 Hz |
+| **Octaver** | A period tracker driving a phase-locked oscillator. Zero latency, and clean by construction: every partial is generated at a frequency it chose, so nothing aliases. Growl sets how much harmonic content the octave carries, since an octave below the low strings is mostly under 40 Hz and inaudible without it |
 | **Envelope filter** | Three voices in the spirit of an EBS BassIQ, plus a high-pass mix-in that blends dry string definition back over a resonant low-pass |
 | **Phaser** | A crossover, because phase accumulates across the all-pass chain and a sweep floor alone does not protect the fundamental |
 | **Chorus** | A crossover at 150–250 Hz, below which nothing moves. Two modulated voices from one LFO |
@@ -55,7 +55,7 @@ standalone application.
 ./build/BassRigTests_artefacts/Release/BassRigTests.exe
 ```
 
-95 test cases. They are measurements rather than smoke tests — aliasing against
+100 test cases. They are measurements rather than smoke tests — aliasing against
 a deliberately naive build, blend phase coherence at the comb frequencies,
 octave tracking through a decaying note.
 

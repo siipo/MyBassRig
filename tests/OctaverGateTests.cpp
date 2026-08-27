@@ -3,6 +3,7 @@
 #include "dsp/OctaverPedal/OctaverPedal.h"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 #include <juce_dsp/juce_dsp.h>
 
 using namespace TestSignals;
@@ -232,7 +233,7 @@ TEST_CASE ("the divider produces an octave below the note", "[octaver]")
     }
 }
 
-TEST_CASE ("the second flip-flop is two octaves down", "[octaver]")
+TEST_CASE ("the second voice is two octaves down", "[octaver]")
 {
     constexpr float note = 220.0f;
 
@@ -510,24 +511,22 @@ TEST_CASE ("octaver stays finite on a hot low note", "[octaver][stability]")
 // the grid. Off-grid energy is therefore a clean measure of what should not be
 // there.
 //
-// Measured, tone wide open (worst case -- the default 700 Hz tone low-pass
-// removes 5 to 7 dB of it):
+// Measured with the tone control wide open, which is the worst case.
 //
-//     f0        octave    off-grid    margin to -28 dB
-//     111 Hz     56 Hz    -38.9 dB      10.9
-//     220 Hz    110 Hz    -35.6 dB       7.6
-//     439 Hz    220 Hz    -32.5 dB       4.5
+//     f0        octave    flip-flop   oscillator   margin to -45 dB
+//     111 Hz     56 Hz     -38.9 dB    -59.7 dB      14.7
+//     220 Hz    110 Hz     -35.6 dB    -55.3 dB      10.3
+//     439 Hz    220 Hz     -32.5 dB    -49.3 dB       4.3
 //
-// It worsens about 3 dB per octave up the neck, and improves 6 dB for every
-// doubling of the sample rate (measured at 48, 96 and 192 kHz). That last
-// number is the useful one: it means oversampling the divider buys 6 dB a
-// doubling, so reaching the -60 dB the drive manages would take about 32x.
-// Sub-sample edge placement is the cheaper route if this is ever worth fixing.
-// See DESIGN.md 3q.
+// The left column is the old comparator-and-flip-flop divider, whose square was
+// switched on whichever sample boundary was nearest; the right is the phase
+// locked oscillator that replaced it. Between 17 and 21 dB cleaner, and it is
+// cleaner by construction rather than by tuning -- every partial is generated
+// at a frequency we chose, so there is nothing to fold.
 //
-// The threshold is -28 dB, which is where the measurements are, not where they
-// ought to be. This is a regression test, not a target: it says the divider has
-// not got dirtier, and says nothing about whether -32 dB is good enough.
+// The threshold is -45 dB, which is where the measurements are and not where
+// they ought to be. It was -28 dB against the old design; leaving it there
+// would have let the octaver get 17 dB dirtier without a word.
 //
 // What it catches, and what it does not. Crippling the tracking filter moves
 // the number from -35.6 dB to +18.5 dB, so a divider that stops dividing is
@@ -589,7 +588,7 @@ TEST_CASE ("octaver off-grid energy does not regress", "[octaver][aliasing]")
         const auto db = 10.0 * std::log10 (juce::jmax (offGrid / juce::jmax (onGrid, 1e-30), 1e-30));
 
         INFO ("f0 " << f0 << " Hz, octave " << subHz << " Hz, off-grid " << db << " dB");
-        REQUIRE (db < -28.0);
+        REQUIRE (db < -45.0);
 
         // The octave has to actually be there. Without this the test passes
         // beautifully on silence.
@@ -664,4 +663,263 @@ TEST_CASE ("growl does not run away with the level", "[octaver][growl]")
         // next pedal. Four and a half times full scale was the fault.
         REQUIRE (loudPeak < 2.5f);
     }
+}
+// The whole reason the octaver was redesigned.
+//
+// A comparator driving a flip-flop has MEMORY: one spurious crossing does not
+// produce a blip, it inverts the division from that point on, so the pedal
+// carries on at the wrong octave until something resets it. That is what "it
+// jumps an octave" meant, and the three guards in DESIGN.md 3o all worked on
+// preventing the spurious crossing rather than on surviving one.
+//
+// The period tracker cannot do that. A reading which disagrees with the running
+// estimate is only believed once the NEXT reading agrees with it, so a lone
+// glitch moves nothing, while a real note change is still accepted inside two
+// cycles.
+//
+// Measured by counting zero crossings of the sub across a window containing the
+// glitch. Growl is at zero on purpose: the sub is then a pure sine, so the
+// count is exactly frequency times duration and nothing else. (Section 3o
+// records zero-crossing counting giving a wrong answer once before, when it was
+// reading the ring of a crossover filter on a square edge. There is no square
+// and no crossover here.)
+//
+// WHAT THIS GUARDS, AND WHAT IT DOES NOT.
+//
+// It guards the architecture. Put a flip-flop back and this fails loudly: the
+// division inverts and stays inverted, which is a whole octave of error against
+// a tolerance of one crossing.
+//
+// It does NOT guard the two-agreement rule. Setting agreementsForNewNote to 1
+// still passes, and that was worth finding out rather than assuming: with a
+// single agreement the wrong period survives about one input cycle before the
+// next reading corrects it, which is below what this window can see. The
+// robustness does not rest on that constant alone -- the period smoothing and
+// the phase lock both blunt a lone bad reading too -- so no single-constant
+// sabotage of the tracker moves this number.
+//
+// Four versions of this test were needed to establish even that much. The first
+// injected a glitch alternating every sample, 24 kHz, which the 250 Hz tracking
+// filter removed before the detector saw it. The second measured a window
+// starting long after the glitch, by which time everything had recovered. The
+// third dropped the bump at a fixed sample, where it landed in the note's
+// negative half and deepened an excursion that already existed instead of
+// creating one. Only the fourth actually produces the extra crossing it claims
+// to -- and it still does not discriminate against the constant, which is
+// recorded here rather than glossed.
+TEST_CASE ("a spurious crossing does not move the octave", "[octaver][tracking]")
+{
+    constexpr float note = 110.0f;      // an octave down is 55 Hz
+    constexpr int settle = 8192;
+    constexpr int windowLength = 8192;
+
+    const auto crossingsAfterGlitch = [] (bool injectGlitch)
+    {
+        Fix<OctaverPedal> f;
+        f.set (ParamID::octOn, 1.0f);
+        f.set (ParamID::octDirect, 0.0f);    // the generated octave alone
+        f.set (ParamID::octSubOne, 1.0f);
+        f.set (ParamID::octSubTwo, 0.0f);
+        f.set (ParamID::octGrowl, 0.0f);     // a pure sine, so counting is exact
+        f.prepare();
+
+        auto buffer = sine (note, settle + windowLength + 4096, 1, 0.6f);
+
+        if (injectGlitch)
+        {
+            // WHERE matters as much as what. Dropped at a fixed sample the bump
+            // landed in the note's negative half, where it only deepened an
+            // excursion that was already there and produced no extra crossing
+            // whatsoever -- which is why two earlier versions of this test could
+            // not tell a working tracker from a broken one.
+            //
+            // Placed at a positive peak, a downward bump has to drag the signal
+            // through zero and back, which is exactly the extra crossing a
+            // comparator would have counted.
+            int glitchAt = settle;
+
+            while (glitchAt < settle + 2048 && buffer.getSample (0, glitchAt) < 0.55f)
+                ++glitchAt;
+
+            const auto glitchSamples = juce::roundToInt (sampleRate / 160.0 * 0.5);
+
+            for (int n = 0; n < glitchSamples; ++n)
+            {
+                const auto at = glitchAt + n;
+                const auto bump = 1.6f * std::sin (juce::MathConstants<float>::pi
+                                                    * (float) n / (float) glitchSamples);
+                buffer.setSample (0, at, buffer.getSample (0, at) - bump);
+            }
+        }
+
+        const auto out = f.run (std::move (buffer));
+
+        // Counted from the glitch onwards, so a wrong period lasting even a
+        // couple of cycles shows up.
+        int crossings = 0;
+
+        for (int n = settle + 1; n < settle + windowLength; ++n)
+        {
+            const auto a = out.getSample (0, n - 1);
+            const auto b = out.getSample (0, n);
+
+            if ((a <= 0.0f && b > 0.0f) || (a >= 0.0f && b < 0.0f))
+                ++crossings;
+        }
+
+        return crossings;
+    };
+
+    const auto clean = crossingsAfterGlitch (false);
+    const auto glitched = crossingsAfterGlitch (true);
+
+    // A 55 Hz sine crosses zero twice a cycle.
+    const auto expected = juce::roundToInt (note * 0.5 * 2.0 * windowLength / sampleRate);
+
+    INFO ("expected " << expected << " crossings, clean " << clean
+          << ", after a glitch " << glitched);
+
+    REQUIRE (clean == Catch::Approx ((double) expected).margin (2.0));
+
+    // The glitch is allowed to cost a crossing or two while the detector sees
+    // it. It is not allowed to change what the octave IS.
+    REQUIRE (glitched == Catch::Approx ((double) clean).margin (2.0));
+}
+
+// Reported from playing a real note in a DAW: "there is audible crackle when
+// the note fades".
+//
+// The generated octave is a sine. Its amplitude was gated by a BOOLEAN --
+// `shape = hasPitch ? envelope : 0` -- and as a note decays the crossings the
+// tracker feeds on get sporadic, so it drops the pitch and re-acquires it,
+// repeatedly. Every one of those toggles is a step discontinuity in an
+// otherwise smooth waveform, which is exactly what a click is. Enough of them
+// in a row is a crackle.
+//
+// The old flip-flop design had the same boolean and did not crackle audibly,
+// because a hard square is already nothing but discontinuities and one more did
+// not stand out. Replacing it with a clean waveform is what made this audible:
+// a fault that had been there all along, uncovered rather than introduced.
+//
+// Measured as slew RELATIVE TO LOCAL AMPLITUDE, which is the whole trick. A
+// click in a fade is small in absolute terms -- the signal is quiet by then --
+// so an absolute slew limit does not see it. The first version of this test
+// used one and passed happily against the reported fault, measuring a worst
+// step of 0.0166 against a permitted 0.0154, and finding it 0.11 s into the
+// note rather than anywhere near the fade.
+//
+// Against the local level it is obvious: a smooth sine steps by 2*pi*f/fs of
+// its own amplitude per sample, about 0.008 at these frequencies, while a gate
+// slamming shut steps by the entire amplitude at once. Two orders of magnitude
+// apart, at any level.
+TEST_CASE ("the octave does not click as a note decays", "[octaver][tracking]")
+{
+    constexpr float note = 82.4f;       // low E; an octave down is 41.2 Hz
+
+    // Long enough, and decaying far enough, to pass right THROUGH the region
+    // where the tracker starts and stops believing what it sees. An earlier
+    // version stopped at 0.024, comfortably above the squelch at 0.0018, so the
+    // pitch never dropped, the gate never fired, and the test could not tell a
+    // boolean gate from a ramped one -- it reported the same figure to six
+    // digits either way.
+    constexpr int numSamples = 1 << 18; // about 5.5 s
+
+    Fix<OctaverPedal> f;
+    f.set (ParamID::octOn, 1.0f);
+    f.set (ParamID::octDirect, 0.0f);   // the generated octave alone
+    f.set (ParamID::octSubOne, 1.0f);
+    f.set (ParamID::octSubTwo, 0.0f);
+    f.set (ParamID::octGrowl, 0.35f);
+    f.prepare();
+
+    // A plucked note whose harmonics decay faster than its fundamental, as a
+    // string does, so it passes THROUGH the region where tracking gets marginal
+    // instead of stopping dead.
+    juce::AudioBuffer<float> pluck (1, numSamples);
+    pluck.clear();
+
+    {
+        auto* d = pluck.getWritePointer (0);
+        const float level[] { 1.0f, 0.55f, 0.35f, 0.22f };
+
+        for (int h = 1; h <= 4; ++h)
+            for (int i = 0; i < numSamples; ++i)
+            {
+                const auto t = (float) i / (float) sampleRate;
+                d[i] += 0.7f * level[h - 1] * std::exp (-t / (0.6f / (float) h))
+                            * std::sin (juce::MathConstants<float>::twoPi * note * (float) h * t);
+            }
+
+        // A noise floor, because a real instrument has one and it is what makes
+        // crossings unreliable rather than merely quiet as a note dies away.
+        juce::Random random (4242);
+
+        for (int i = 0; i < numSamples; ++i)
+            d[i] += 2.0e-4f * (random.nextFloat() * 2.0f - 1.0f);
+    }
+
+    const auto out = f.run (std::move (pluck));
+
+    // The local reference is a CENTRED window, not a follower. A one-sided
+    // follower reads a note's onset as a huge relative step -- the signal really
+    // is doubling every few samples while it grows out of silence -- and that
+    // swamped everything: the first version of this measurement reported 0.43 at
+    // sample 684, which is the first cycle of the note, and returned exactly the
+    // same figure after two genuine fixes. It was measuring the attack.
+    constexpr int blockSize = 64;
+    const auto numBlocks = out.getNumSamples() / blockSize;
+
+    std::vector<float> blockPeak ((size_t) numBlocks, 0.0f);
+
+    for (int b = 0; b < numBlocks; ++b)
+        for (int n = 0; n < blockSize; ++n)
+            blockPeak[(size_t) b] = juce::jmax (blockPeak[(size_t) b],
+                                                std::abs (out.getSample (0, b * blockSize + n)));
+
+    float worstRatio = 0.0f;
+    int worstAt = 0;
+
+    for (int i = 1; i < numBlocks * blockSize; ++i)
+    {
+        // Loudest thing within about 5 ms either side.
+        const auto centre = i / blockSize;
+        float local = 0.0f;
+
+        for (int b = juce::jmax (0, centre - 4); b <= juce::jmin (numBlocks - 1, centre + 4); ++b)
+            local = juce::jmax (local, blockPeak[(size_t) b]);
+
+        // Below this the octave is inaudible and the ratio is noise over noise.
+        if (local < 1.0e-4f)
+            continue;
+
+        const auto slew = std::abs (out.getSample (0, i) - out.getSample (0, i - 1));
+        const auto ratio = slew / local;
+
+        if (ratio > worstRatio)
+        {
+            worstRatio = ratio;
+            worstAt = i;
+        }
+    }
+
+    // What a smooth waveform can manage: the octave's third harmonic under
+    // Growl is the fastest thing present.
+    const auto highestPartialHz = note * 0.5f * 3.0f;
+    const auto smoothRatio = juce::MathConstants<float>::twoPi * highestPartialHz
+                                / (float) sampleRate;
+
+    INFO ("smooth step is " << smoothRatio << " of local amplitude; worst was "
+          << worstRatio << " at sample " << worstAt
+          << " (" << ((double) worstAt / sampleRate) << " s)");
+
+    // Twice the smooth maximum, which is where the measurements are:
+    //
+    //     ramped gate   0.0101      <- 3.2x of margin
+    //     threshold     0.0324
+    //     boolean gate  0.0369      <- the reported fault
+    //
+    // Not a round number chosen in advance. Ten times the smooth step was tried
+    // first and let the fault straight through, and there is no point in a
+    // threshold that a known bug satisfies.
+    REQUIRE (worstRatio < 2.0f * smoothRatio);
 }

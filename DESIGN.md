@@ -1213,6 +1213,110 @@ goes from reporting on run 1 to silent.
 ---
 
 
+## 3t. Redesigning the octaver, because it sounded bad
+
+The octaver was measurably correct and sounded wrong. Asked what was wrong with
+it, the answer was three of four offered symptoms — gritty, wrong octave,
+response — with an EBS-style cleaner sub as the target. Every one of those falls
+out of the architecture, not out of tuning:
+
+| symptom | cause |
+|---|---|
+| gritty, buzzy | a hard square switched on the nearest sample boundary |
+| wrong octave | a flip-flop has memory: one bad crossing inverts the division and it stays inverted |
+| response | the octave was literally `square x envelope` |
+
+Note the second one especially. Section 3o added three redundant guards to stop
+a spurious crossing happening, and every one of them worked on prevention. None
+addressed the fact that the design could not SURVIVE one.
+
+### What replaced it
+
+A period tracker driving a phase-locked oscillator. Crossings are timed rather
+than counted: a reading that disagrees with the running estimate is only
+believed once the next reading agrees with IT, so a lone glitch moves nothing
+while a real note change is still accepted inside two cycles. A phase
+accumulator runs at half the tracked frequency and is nudged towards alignment
+on each crossing, so there is no state that can be stuck in the wrong half.
+
+The waveform is a sine plus explicitly chosen second and third harmonics. Every
+partial exists at a frequency we picked, so nothing folds — the cleanliness is
+structural rather than tuned.
+
+| f0 | flip-flop | oscillator | |
+|---|---|---|---|
+| 111 Hz | −38.9 dB | **−59.7 dB** | 20.8 dB cleaner |
+| 220 Hz | −35.6 dB | **−55.3 dB** | 19.7 dB cleaner |
+| 439 Hz | −32.5 dB | **−49.3 dB** | 16.8 dB cleaner |
+
+Growl falls out for free. It now sets harmonic content directly, and since the
+amplitudes are chosen rather than produced by clipping, the level can move by at
+most `sqrt(1 + 0.7² + 0.45²)` = 2.3 dB. The level follower and the +3 dB ceiling
+that section 3r had to invent are both deleted.
+
+Normalising to constant power was tried first and is wrong: on a note whose
+octave already sits above 40 Hz it makes Growl add exactly **−0.0003 dB** of
+audible energy, because there is nothing left to redistribute from. The existing
+audibility test caught it immediately.
+
+All eleven octaver tests were written at the behaviour level rather than against
+the implementation — "produces an octave below the note", "holds through a
+decaying note", "does not run away with the level" — so a complete architectural
+replacement kept every one of them passing. That is the whole return on writing
+tests that way, collected in one go.
+
+### The fault the redesign uncovered
+
+Played in a DAW: *"there is audible crackle when the note fades"*.
+
+The amplitude was gated by a BOOLEAN — `shape = hasPitch ? envelope : 0`. As a
+note decays the crossings get sporadic, the tracker drops and re-acquires
+repeatedly, and each toggle stepped the waveform by its entire amplitude. The
+phase lock had the same shape of bug: it corrected phase instantaneously on each
+crossing, which moves a sine's value in one step.
+
+**The old design had exactly the same boolean gate.** Nobody ever heard it,
+because a hard square is already nothing but discontinuities and one more did
+not stand out. Cleaning the waveform did not introduce this fault, it exposed
+one that had been shipping all along.
+
+Worst sample-to-sample step, relative to local amplitude:
+
+| build | worst step |
+|---|---|
+| boolean gate + instant phase correction | 0.0369 |
+| ramped gate, instant phase correction | 0.0173 |
+| both fixed | **0.0101** |
+| what a smooth waveform does anyway | 0.0162 |
+
+### Five attempts at the test, four of them green against the bug
+
+The worst-behaved measurement in this project so far, and worth writing out
+because each failure was a different way of measuring the wrong thing:
+
+1. **Absolute slew.** A click during a fade is quiet in absolute terms. It saw
+   nothing.
+2. **Relative slew against a one-sided follower.** The reference lagged, so a
+   note's ATTACK read as an enormous relative step. It reported 0.43 at sample
+   684 — the first cycle — and returned the identical figure after two genuine
+   fixes, which is what gave it away.
+3. **Centred window, correct metric, wrong signal.** The synthetic note decayed
+   only to 0.024, well clear of the squelch at 0.0018, so the tracker never
+   dropped and the gate never fired. Boolean and ramped gates measured the same
+   to six digits.
+4. **Right signal, threshold too loose.** Ten times the smooth step let a known
+   bug straight through. A threshold a known bug satisfies is not a threshold.
+5. **Realistic decay through the squelch with a noise floor, threshold at 2x.**
+   Validated in both directions.
+
+The recurring error across all four failures is the same one as sections 3b, 3k,
+3q and 3s: measuring something adjacent to the thing of interest and believing
+the number. The tell, twice now, was a figure that did not move when the code
+did.
+
+---
+
+
 ## 4. Fixing what went wrong in Wibeboard
 
 | Wibeboard | BassRig |
@@ -1291,6 +1395,13 @@ reference project above. Consequences:
         `--repeat 10`. It found a state-restoration bug on its first run that
         no test here could see. AU added, since macOS runners make it free.
         95 tests green.
+17. [x] A heap-corrupting race between audio-thread automation and the preset
+        manager's dirty flag, found by AddressSanitizer after two days of
+        inference found nothing. 98 tests green. See section 3s.
+18. [x] Octaver redesigned: period tracker and phase-locked oscillator in place
+        of comparator and flip-flop, because it was measurably correct and
+        sounded bad. 17 to 21 dB cleaner, and the crackle the redesign exposed
+        is fixed too. 100 tests green. See section 3t.
 
 ### Also outstanding
 
@@ -1306,11 +1417,10 @@ reference project above. Consequences:
   distinct and evenly spread, which is not the same as sounding good. The Grunt
   corners (5 / 100 / 250 Hz), the recovery low-pass at 5 kHz and the interstage
   gain of 1.8 are all still first guesses in that sense.
-- The octaver generates its square by hard-switching at base rate, with no band
-  limiting and no oversampling. Now measured rather than assumed: −32 to −44 dB
-  of off-grid content, improving 6 dB per doubling of sample rate, so
-  oversampling is a poor trade and sub-sample edge placement is the route if it
-  is ever worth fixing. See section 3q. Whether it is audible is still unknown.
+- ~~The octaver's square aliases~~ — superseded by section 3t. The divider it
+  described no longer exists; the oscillator that replaced it is 17 to 21 dB
+  cleaner and does not alias by construction. Section 3q is kept for the
+  measurement method, which is what found the problem in the first place.
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.

@@ -138,11 +138,97 @@ jobs:
           name: ui-snapshots
           path: ci-snapshots/
 
+      # Packaged HERE rather than in the release job on purpose. Uploading a
+      # macOS bundle as loose files and rezipping it later loses the symlinks
+      # inside .vst3/.component and the executable bit on everything, and the
+      # result will not load. Archiving on the runner that built it keeps both.
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -n "${GITHUB_REF_NAME:-}" ] && [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="$(grep "^project(BassRig VERSION" CMakeLists.txt | cut -d' ' -f3)+${GITHUB_SHA::7}"
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+
+          stage="stage/BassRig-$version-${{ matrix.name }}"
+          mkdir -p "$stage"
+          for kind in VST3 AU Standalone; do
+            [ -d "$ARTEFACTS/$kind" ] && cp -R "$ARTEFACTS/$kind" "$stage/"
+          done
+          cp LICENSE THIRD_PARTY.md "$stage/"
+
+          cat > "$stage/README.txt" <<TXT
+          BassRig $version (${{ matrix.name }})
+
+          Copy the VST3 (and on macOS the .component) into your plugin folder:
+
+            Windows  C:\Program Files\Common Files\VST3
+            macOS    ~/Library/Audio/Plug-Ins/VST3   and   .../Components
+            Linux    ~/.vst3
+
+          The binaries are not code signed. Windows SmartScreen and macOS
+          Gatekeeper will both object the first time.
+
+          BassRig is free software under the GNU AGPL v3 (see LICENSE). The
+          corresponding source for this build is:
+
+            https://github.com/siipo/MyBassRig
+            tag    ${{ github.ref_name }}
+            commit ${{ github.sha }}
+
+          THIRD_PARTY.md lists every dependency and its licence.
+          TXT
+
+          mkdir -p dist
+          archive="$PWD/dist/BassRig-$version-${{ matrix.name }}.zip"
+          # -y keeps symlinks as symlinks, which is what macOS bundles need.
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ( cd "$stage/.." && python -c "import shutil,sys; shutil.make_archive(sys.argv[1][:-4],'zip',sys.argv[2])" "$archive" "$(basename "$stage")" )
+          else
+            ( cd "$stage" && zip -qry "$archive" . )
+          fi
+          ls -l dist/
+
       - name: Upload plugin
         uses: actions/upload-artifact@v4
         with:
           name: BassRig-${{ matrix.name }}
           if-no-files-found: error
-          path: |
-            ${{ env.ARTEFACTS }}/VST3/
-            ${{ env.ARTEFACTS }}/AU/
+          path: dist/*.zip
+
+  # ---------------------------------------------------------------------------
+  # Only on a version tag, and only once every platform has built, tested and
+  # passed pluginval. A release that skipped validation would defeat the point.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    needs: build
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Collect platform archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: BassRig-*
+          merge-multiple: true
+          path: dist
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.zip | tee SHA256SUMS.txt
+          ls -l
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ github.ref_name }}" dist/*.zip dist/SHA256SUMS.txt             --repo "${{ github.repository }}"             --title "BassRig ${{ github.ref_name }}"             --notes-file .github/release-notes.md             --draft

@@ -75,7 +75,7 @@ private:
     // one has its own bypass rather than being swapped in and out, which is
     // what keeps the audio thread free of locks.
     std::vector<std::unique_ptr<Pedal>> chain;
-    juce::AudioParameterBool* bypassParam = nullptr;
+    Params::LosslessBool* bypassParam = nullptr;
 
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
     void valueTreeRedirected (juce::ValueTree&) override;

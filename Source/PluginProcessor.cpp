@@ -10,7 +10,7 @@ BassRigProcessor::BassRigProcessor()
                           .withOutput ("Out", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", Params::createLayout())
 {
-    bypassParam = dynamic_cast<juce::AudioParameterBool*> (apvts.getParameter (ParamID::bypass));
+    bypassParam = dynamic_cast<Params::LosslessBool*> (apvts.getParameter (ParamID::bypass));
     jassert (bypassParam != nullptr);
 
     chain = PedalRegistry::createChain (apvts);

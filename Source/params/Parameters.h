@@ -106,6 +106,93 @@ namespace Params
     // Index 0 is Off and is never used as a cutoff.
     inline constexpr std::array<float, 3> sidechainHighpassHz { 20.0f, 80.0f, 160.0f };
 
+    // A bool whose value survives being saved.
+    //
+    // juce::AudioParameterBool stores whatever raw normalised float the host
+    // hands it and only thresholds at 0.5 when read, so it can sit at 0.47
+    // while reporting false. That is fine in itself. What is not fine is its
+    // NormalisableRange, which is { 0, 1, 1 } -- interval 1, so denormalising
+    // 0.47 snaps it to 0. APVTS saves the DENORMALISED value, so the 0.47 is
+    // thrown away by the save and cannot come back.
+    //
+    // The host does not forget. A VST3 host caches the value it sent, so after
+    // a save-and-restore its cache says 0.47 and the plugin says 0. pluginval's
+    // state-restoration test is precisely this comparison, and it fails on any
+    // draw further than 0.1 from a step -- about 80% of them.
+    //
+    // The fix is one character: a continuous range. Normalised and denormalised
+    // then agree, the save is lossless, and everything downstream is unchanged.
+    // The parameter still reports two steps and still reads as a boolean, so
+    // hosts draw it as a switch, and get() thresholds exactly as before.
+    //
+    // Two other fixes were tried and both were wrong, in the same way -- they
+    // treated the divergence rather than the lossy save. Forcing every
+    // parameter to match the tree after replaceState only moved the mismatch;
+    // snapping on assignment made the plugin silently alter what the host sent,
+    // which is the same divergence with the sign flipped. See DESIGN.md 3p.
+    //
+    // Written out rather than subclassed: juce::AudioParameterBool declares
+    // setValue, getValue and its backing float all private, and get() is
+    // non-virtual, so a subclass cannot change this behaviour. This mirrors
+    // that class with the range changed.
+    class LosslessBool final : public juce::RangedAudioParameter
+    {
+    public:
+        LosslessBool (const juce::ParameterID& parameterID, const juce::String& parameterName,
+                      bool def)
+            : juce::RangedAudioParameter (parameterID, parameterName),
+              value (def ? 1.0f : 0.0f),
+              valueDefault (def) {}
+
+        bool get() const noexcept       { return value.load() >= 0.5f; }
+        operator bool() const noexcept  { return get(); }
+
+        const juce::NormalisableRange<float>& getNormalisableRange() const override
+        {
+            return range;
+        }
+
+    private:
+        float getValue() const override        { return value.load(); }
+        void setValue (float newValue) override { value.store (newValue); }
+
+        float getDefaultValue() const override { return valueDefault ? 1.0f : 0.0f; }
+
+        // Still two steps and still a boolean as far as the host is concerned.
+        // Only the RANGE is continuous, and the range is used for nothing but
+        // normalising and denormalising.
+        int getNumSteps() const override       { return 2; }
+        bool isDiscrete() const override       { return true; }
+        bool isBoolean() const override        { return true; }
+
+        juce::String getText (float v, int) const override
+        {
+            return v >= 0.5f ? TRANS ("On") : TRANS ("Off");
+        }
+
+        float getValueForText (const juce::String& text) const override
+        {
+            const auto lower = text.toLowerCase().trim();
+
+            if (lower == "on" || lower == "yes" || lower == "true")
+                return 1.0f;
+
+            if (lower == "off" || lower == "no" || lower == "false")
+                return 0.0f;
+
+            return text.getIntValue() != 0 ? 1.0f : 0.0f;
+        }
+
+        // The whole fix: no interval, so convertFrom0to1 is the identity and
+        // APVTS stores exactly what the host sent.
+        inline static const juce::NormalisableRange<float> range { 0.0f, 1.0f };
+
+        std::atomic<float> value;
+        bool valueDefault;
+    };
+
+    std::unique_ptr<LosslessBool> boolParam (const char* id, const char* name, bool def);
+
     // Shared parameter constructors, so every pedal builds its controls the
     // same way.
     std::unique_ptr<juce::AudioParameterFloat> gainParam (const char* id, const char* name,

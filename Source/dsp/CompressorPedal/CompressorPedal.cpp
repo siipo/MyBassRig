@@ -34,8 +34,7 @@ void CompressorPedal::addParameters (juce::AudioProcessorValueTreeState::Paramet
     // moment you play; a compressor quietly changing dynamics and level does
     // not, and a plugin that squashes on insert without being asked is a
     // surprise. Presets that want it turn it on.
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::compOn, 1 }, "Comp", false));
+    layout.add (Params::boolParam (ParamID::compOn, "Comp", false));
 
     layout.add (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { ParamID::compThreshold, 1 }, "Threshold",

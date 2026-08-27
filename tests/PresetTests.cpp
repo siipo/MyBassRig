@@ -252,3 +252,69 @@ TEST_CASE ("parameter state still round trips with presets in the mix", "[preset
     REQUIRE (b.value (ParamID::grunt) == Catch::Approx (2.0f).margin (1e-3));
     REQUIRE (b.value (ParamID::hiMid) == Catch::Approx (-8.5f).margin (1e-3));
 }
+
+// ---------------------------------------------------------------------------
+// Found by pluginval at strictness 10, not by anything here.
+//
+// juce::AudioParameterBool has a NormalisableRange of { 0, 1, 1 }. APVTS saves
+// the DENORMALISED value, and denormalising through an interval of 1 snaps, so
+// a parameter sitting at 0.47 is saved as 0 and the 0.47 is gone. The host does
+// not forget: a VST3 host caches the value it sent, so after a restore its
+// cache and the plugin disagree. Params::LosslessBool uses a continuous range
+// instead, which makes the save exact.
+//
+// The plugin SOUNDED right throughout, because every read goes through get(),
+// which thresholds. What was wrong was the host's view of the parameter -- wrong
+// in an automation lane, and wrong again the next time the host saves.
+//
+// Two earlier attempts are recorded in DESIGN.md 3p because both LOOKED
+// correct: one forced parameters to match the tree after replaceState, the
+// other snapped values on assignment. Both left the same divergence, and the
+// second made the plugin silently alter what the host had sent. A companion
+// test for AudioParameterChoice was also written and deleted -- it passed
+// against the broken build, so it was testing nothing.
+TEST_CASE ("bool parameters survive a state round trip exactly", "[presets][state]")
+{
+    PresetFixture fx;
+
+    const char* bools[] = {
+        ParamID::gateOn, ParamID::compOn,   ParamID::octOn,        ParamID::envOn,
+        ParamID::phaserOn, ParamID::chorusOn, ParamID::phaserInvert, ParamID::bypass,
+    };
+
+    // Fractions well away from 0 and 1, since those are the ones a snapping
+    // range destroys. 0.471294 is the value pluginval happened to fail on.
+    const float values[] = { 0.0f, 0.10f, 0.31f, 0.471294f, 0.5f, 0.62f, 0.897f, 1.0f };
+
+    for (const char* id : bools)
+    {
+        auto* param = fx.proc.apvts.getParameter (id);
+        REQUIRE (param != nullptr);
+
+        for (float sent : values)
+        {
+            INFO ("parameter: " << id << ", value: " << sent);
+
+            param->setValueNotifyingHost (sent);
+
+            // Held verbatim. A host that sent this value must read it back.
+            REQUIRE (param->getValue() == Catch::Approx (sent).margin (1.0e-6f));
+
+            juce::MemoryBlock state;
+            fx.proc.getStateInformation (state);
+
+            // Scribble over it with something on the other side of the
+            // threshold, so a restore that does nothing cannot pass.
+            param->setValueNotifyingHost (sent < 0.5f ? 0.93f : 0.07f);
+
+            fx.proc.setStateInformation (state.getData(), (int) state.getSize());
+
+            // Exactly what was sent, not merely something that reads the same
+            // way. This is the assertion pluginval makes.
+            REQUIRE (param->getValue() == Catch::Approx (sent).margin (1.0e-6f));
+
+            // And the logical value the DSP reads must still agree.
+            REQUIRE ((param->getValue() >= 0.5f) == (sent >= 0.5f));
+        }
+    }
+}

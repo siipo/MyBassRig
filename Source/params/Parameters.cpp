@@ -28,6 +28,11 @@ std::unique_ptr<juce::AudioParameterFloat> Params::knobParam (const char* id, co
             [] (float v, int) { return juce::String (v * 10.0f, 1); }));
 }
 
+std::unique_ptr<Params::LosslessBool> Params::boolParam (const char* id, const char* name, bool def)
+{
+    return std::make_unique<LosslessBool> (juce::ParameterID { id, 1 }, name, def);
+}
+
 std::unique_ptr<juce::AudioParameterFloat> Params::percentParam (const char* id, const char* name,
                                                                  float def)
 {
@@ -50,8 +55,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout Params::createLayout()
     // Declared here rather than in a pedal because it bypasses the whole rig,
     // and so the host gets a proper bypass with correct latency compensation
     // rather than the plugin faking it internally.
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::bypass, 1 }, "Bypass", false));
+    layout.add (Params::boolParam (ParamID::bypass, "Bypass", false));
 
     return layout;
 }

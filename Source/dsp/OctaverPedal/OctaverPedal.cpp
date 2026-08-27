@@ -70,8 +70,7 @@ void OctaverPedal::addParameters (juce::AudioProcessorValueTreeState::ParameterL
 {
     using Range = juce::NormalisableRange<float>;
 
-    layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { ParamID::octOn, 1 }, "Octave", false));
+    layout.add (Params::boolParam (ParamID::octOn, "Octave", false));
 
     layout.add (Params::percentParam (ParamID::octDirect, "Direct", 1.0f));
     layout.add (Params::percentParam (ParamID::octSubOne, "Octave 1", 0.6f));

@@ -1,0 +1,148 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # JUCE puts artefacts under $<CONFIG> for EVERY generator, single-config ones
+  # included, so this segment is present on all three platforms.
+  ARTEFACTS: build/BassRig_artefacts/Release
+
+  # pluginval draws random parameter values, so one clean run proves less than
+  # it looks: the bug in DESIGN.md 3p failed roughly one run in three. Repeat
+  # until a coin-toss failure is not plausibly a pass.
+  PLUGINVAL_REPEATS: 10
+  PLUGINVAL_VERSION: v1.0.4
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+          - name: macOS
+            os: macos-14
+          - name: Windows
+            os: windows-2022
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Without these JUCE fails at configure time on missing X11/ALSA/freetype
+      # headers rather than on anything that names the real problem.
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libjack-jackd2-dev libcurl4-openssl-dev \
+            libfreetype-dev libfontconfig1-dev \
+            libx11-dev libxcomposite-dev libxcursor-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxrender-dev \
+            libglu1-mesa-dev mesa-common-dev \
+            ninja-build xvfb
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Install Ninja (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress -y
+
+      # MSVC is not on PATH for a Ninja build unless the environment is set up.
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # JUCE, chowdsp and Catch2 are all FetchContent, so this is most of the
+      # build. Keyed on the file that pins their versions.
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      # Several tests construct the editor, and APVTS runs a Timer, so the tests
+      # need a MessageManager and a display even though they draw nothing.
+      - name: Test
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=build/BassRigTests_artefacts/Release/BassRigTests
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          if [ "${{ runner.os }}" = "Linux" ]; then xvfb-run -a "$bin"; else "$bin"; fi
+
+      - name: Install pluginval
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Linux)   asset=pluginval_Linux.zip ;;
+            macOS)   asset=pluginval_macOS.zip ;;
+            Windows) asset=pluginval_Windows.zip ;;
+          esac
+          curl -fsSL -o pluginval.zip \
+            "https://github.com/Tracktion/pluginval/releases/download/${PLUGINVAL_VERSION}/$asset"
+          # unzip is not guaranteed on the Windows runner; python3 is, on all three.
+          python3 -c "import zipfile,sys; zipfile.ZipFile('pluginval.zip').extractall('pluginval')"
+
+      # Strictness 10 is the maximum, and it is deliberate: the only host
+      # compatibility bug this project has had (DESIGN.md 3p) was invisible
+      # below it, and invisible to all 95 unit tests.
+      - name: Validate
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ runner.os }}" in
+            Linux)   val=pluginval/pluginval ;;
+            macOS)   val=pluginval/pluginval.app/Contents/MacOS/pluginval ;;
+            Windows) val=pluginval/pluginval.exe ;;
+          esac
+          chmod +x "$val" || true
+          # xvfb-run takes the binary and its arguments directly. Wrapping it
+          # in bash -c does not work: the subshell does not inherit $val, so
+          # the command expanded to nothing and exited 127.
+          prefix=""
+          [ "${{ runner.os }}" = "Linux" ] && prefix="xvfb-run -a"
+          $prefix "$val" --strictness-level 10 --repeat "$PLUGINVAL_REPEATS" --randomise --timeout-ms 600000 --validate "$ARTEFACTS/VST3/BassRig.vst3"
+
+      # The pedal face is drawn in code, so a layout regression is otherwise
+      # only visible by loading the plugin into a host.
+      - name: Render UI snapshots
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ./build/BassRigSnapshot_artefacts/Release/BassRigSnapshot ci-snapshots
+
+      - name: Upload UI snapshots
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-snapshots
+          path: ci-snapshots/
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: BassRig-${{ matrix.name }}
+          if-no-files-found: error
+          path: |
+            ${{ env.ARTEFACTS }}/VST3/
+            ${{ env.ARTEFACTS }}/AU/

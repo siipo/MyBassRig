@@ -1,5 +1,7 @@
 # BassRig
 
+[![CI](https://github.com/siipo/MyBassRig/actions/workflows/ci.yml/badge.svg)](https://github.com/siipo/MyBassRig/actions/workflows/ci.yml)
+
 A bass pedalboard as a VST3 plugin. Seven pedals in a chain you can reorder,
 built around the idea that a bass effect is not a guitar effect with the treble
 turned down.
@@ -53,9 +55,27 @@ standalone application.
 ./build/BassRigTests_artefacts/Release/BassRigTests.exe
 ```
 
-94 test cases. They are measurements rather than smoke tests — aliasing against
+95 test cases. They are measurements rather than smoke tests — aliasing against
 a deliberately naive build, blend phase coherence at the comb frequencies,
 octave tracking through a decaying note.
+
+### Validation
+
+Unit tests only ever listen to the audio, which is not the whole contract a
+plugin has to keep. `pluginval` checks the other half — state restoration,
+parameter thread safety, bus layouts, block sizes from 1 to 8192, sample rate
+changes mid-stream:
+
+```bash
+pluginval --strictness-level 10 --repeat 10 --randomise --validate build/BassRig_artefacts/Release/VST3/BassRig.vst3
+```
+
+The repeat count is not decoration. Its state test draws random values and
+forgives a draw that lands near a step, so a broken build passes about one run
+in five. The first time it ran it found a real bug that all 94 tests had missed;
+see `DESIGN.md` section 3p.
+
+CI builds and runs all of this on Linux, macOS and Windows on every push.
 
 ### Looking at the UI
 
@@ -82,7 +102,17 @@ change to license this any other way.
 
 ## Status
 
-Everything here is measured. **None of it has been judged by ear**, which is a
-real limitation: the voicing values are chosen so each control is measurably
-distinct and evenly spread across its travel, which is not the same thing as
-sounding good.
+Everything here is measured, and the measurements are recorded in `DESIGN.md`
+rather than summarised. What that does **not** yet include is a systematic
+listening comparison against reference hardware or other plugins.
+
+It has been played. Two of the bugs in `DESIGN.md` — the octave that vanished
+on the low strings, and the octave that jumped up as notes decayed — were found
+that way and not by any test, which is a fair indication of how much a test
+suite can and cannot tell you here.
+
+So: the voicing values are chosen so each control is measurably distinct and
+evenly spread across its travel. That is a proxy for sounding good, not the
+thing itself, and several of them (the Grunt corners at 5 / 100 / 250 Hz, the
+recovery low-pass at 5 kHz, the interstage gain of 1.8) are still first guesses
+in that sense.

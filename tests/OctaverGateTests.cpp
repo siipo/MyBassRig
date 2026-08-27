@@ -494,3 +494,105 @@ TEST_CASE ("octaver stays finite on a hot low note", "[octaver][stability]")
         for (int i = 0; i < out.getNumSamples(); ++i)
             REQUIRE (std::isfinite (out.getSample (ch, i)));
 }
+
+// How much of the octaver's output is not a harmonic of the octave it is
+// generating.
+//
+// The divider makes a hard square by flipping on zero crossings, and it can
+// only flip on a sample boundary, so the square's period wobbles by up to one
+// sample and its edges are not band limited. This is the one place in the
+// plugin where a discontinuity is synthesised, and the ADAA discipline applied
+// to the drive does not reach it.
+//
+// f0 is chosen so f0/2 lands exactly on FFT bin m, which puts every legitimate
+// partial exactly on a multiple of m. Aliased images land at (N - k*m), and
+// 32768 is not a multiple of any m used here, so they can never land back on
+// the grid. Off-grid energy is therefore a clean measure of what should not be
+// there.
+//
+// Measured, tone wide open (worst case -- the default 700 Hz tone low-pass
+// removes 5 to 7 dB of it):
+//
+//     f0        octave    off-grid    margin to -28 dB
+//     111 Hz     56 Hz    -38.9 dB      10.9
+//     220 Hz    110 Hz    -35.6 dB       7.6
+//     439 Hz    220 Hz    -32.5 dB       4.5
+//
+// It worsens about 3 dB per octave up the neck, and improves 6 dB for every
+// doubling of the sample rate (measured at 48, 96 and 192 kHz). That last
+// number is the useful one: it means oversampling the divider buys 6 dB a
+// doubling, so reaching the -60 dB the drive manages would take about 32x.
+// Sub-sample edge placement is the cheaper route if this is ever worth fixing.
+// See DESIGN.md 3q.
+//
+// The threshold is -28 dB, which is where the measurements are, not where they
+// ought to be. This is a regression test, not a target: it says the divider has
+// not got dirtier, and says nothing about whether -32 dB is good enough.
+//
+// What it catches, and what it does not. Crippling the tracking filter moves
+// the number from -35.6 dB to +18.5 dB, so a divider that stops dividing is
+// caught with 54 dB to spare. Removing the comparator hysteresis does NOT trip
+// it, and that is expected rather than a hole: hysteresis exists for the ripple
+// on a DECAYING note, and this test feeds a steady sine at constant amplitude.
+// That regression is the job of "the octave does not jump up as a note decays".
+TEST_CASE ("octaver off-grid energy does not regress", "[octaver][aliasing]")
+{
+    const auto binHz = sampleRate / (double) fftSize;
+
+    for (int m : { 38, 75, 150 })
+    {
+        const auto subHz = (double) m * binHz;
+        const auto f0    = (float) (2.0 * subHz);
+
+        Fix<OctaverPedal> f;
+        f.set (ParamID::octOn, 1.0f);
+        f.set (ParamID::octDirect, 0.0f);      // the generated octave alone
+        f.set (ParamID::octSubOne, 1.0f);
+        f.set (ParamID::octSubTwo, 0.0f);
+        f.set (ParamID::octGrowl, 0.0f);
+        f.set (ParamID::octTone, 4000.0f);     // wide open, so nothing is hidden
+
+        // Tracking has to suit the note. Left at a default that does not, the
+        // comparator never sees a clean fundamental and this measures a
+        // tracking failure instead -- which reads as +33 dB and looks
+        // catastrophic for entirely the wrong reason.
+        f.set (ParamID::octTrack, juce::jlimit (90.0f, 600.0f, f0 * 1.3f));
+        f.prepare();
+
+        constexpr int warmup = 16384;
+        const auto out = f.run (sine (f0, warmup + fftSize, 1, 0.6f));
+
+        REQUIRE (f.pedal.isTracking());
+
+        std::vector<float> bins ((size_t) fftSize * 2, 0.0f);
+        std::copy (out.getReadPointer (0) + warmup,
+                   out.getReadPointer (0) + warmup + fftSize, bins.begin());
+
+        juce::dsp::WindowingFunction<float> window ((size_t) fftSize,
+            juce::dsp::WindowingFunction<float>::hann);
+        window.multiplyWithWindowingTable (bins.data(), (size_t) fftSize);
+        juce::dsp::FFT (fftOrder).performFrequencyOnlyForwardTransform (bins.data());
+
+        double onGrid = 0.0, offGrid = 0.0;
+
+        for (int k = 4; k < fftSize / 2; ++k)
+        {
+            const auto energy  = (double) bins[(size_t) k] * bins[(size_t) k];
+            const auto nearest = ((k + m / 2) / m) * m;
+
+            if (nearest > 0 && std::abs (k - nearest) <= 3)
+                onGrid += energy;
+            else
+                offGrid += energy;
+        }
+
+        const auto db = 10.0 * std::log10 (juce::jmax (offGrid / juce::jmax (onGrid, 1e-30), 1e-30));
+
+        INFO ("f0 " << f0 << " Hz, octave " << subHz << " Hz, off-grid " << db << " dB");
+        REQUIRE (db < -28.0);
+
+        // The octave has to actually be there. Without this the test passes
+        // beautifully on silence.
+        REQUIRE (onGrid > 1e-6);
+    }
+}

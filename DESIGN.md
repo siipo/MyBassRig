@@ -957,6 +957,84 @@ the host, because that contract is not observable from inside.
 ---
 
 
+## 3q. How dirty the octaver actually is
+
+The octaver was on the outstanding list as "aliasing is structural, unmeasured".
+It is now measured, because "the ADAA discipline does not reach this pedal" is
+an argument, not a number, and the fix it implies is expensive.
+
+### The measurement
+
+f0 is chosen so that f0/2 lands exactly on FFT bin m, which puts every
+legitimate partial of the generated octave exactly on a multiple of m. Aliased
+images land at (N - k*m), and 32768 is not a multiple of any m used, so they can
+never fold back onto the grid. Off-grid energy is then a clean measure of what
+should not be there.
+
+Tone wide open, which is the worst case — the default 700 Hz tone low-pass takes
+5 to 7 dB off every figure:
+
+| f0 | octave | off-grid |
+|---|---|---|
+| 111 Hz | 56 Hz | −38.9 dB |
+| 220 Hz | 110 Hz | −35.6 dB |
+| 439 Hz | 220 Hz | −32.5 dB |
+| 879 Hz | 439 Hz | −29.3 dB |
+
+About 3 dB worse per octave up the neck.
+
+### What it costs to fix
+
+Same note, three sample rates:
+
+| f0 | 48 kHz | 96 kHz | 192 kHz |
+|---|---|---|---|
+| ~220 Hz | −35.6 | −41.7 | −48.0 |
+| ~439 Hz | −32.5 | −38.5 | −44.6 |
+
+**Six decibels per doubling, consistently, in both rows.** That is the number
+that decides the design. Oversampling the divider buys 6 dB a doubling, so
+matching the −60 dB the drive manages from −32.5 dB would take about 32x. That
+is not a reasonable price for one pedal.
+
+Six dB per doubling is also the signature of an artefact dominated by *when* the
+edge happens rather than how sharp it is: the comparator can only flip on a
+sample boundary, so the square's period wobbles by up to one sample, and halving
+the sample period halves that error. Which points at sub-sample edge placement —
+computing the fractional zero-crossing time and offsetting the transition — as
+the cheap fix, rather than brute-force oversampling. Not implemented, and not
+attempted here.
+
+### Two wrong readings on the way
+
+Both worth recording, because both looked like findings.
+
+1. At 879 Hz with tracking left at its 250 Hz default, off-grid measured **+33
+   dB** — the artefact louder than the signal. That is not aliasing. The
+   comparator was being fed a note two octaves above its tracking filter and the
+   divider was not dividing. Setting tracking to suit the note turns +33 dB into
+   −29.3 dB. The regression test now asserts `isTracking()` so this cannot be
+   misread again.
+
+2. The first sample-rate sweep fixed the FFT bin index rather than the
+   frequency, so raising the rate raised f0 with it. At 192 kHz that put f0 at
+   1758 Hz, far outside tracking range, and produced another +27 dB reading. The
+   sweep now picks the bin per rate to hold the note constant.
+
+Both are the same mistake as sections 3b and 3k: measuring something adjacent to
+the thing of interest and believing the number.
+
+### Is it good enough
+
+Unknown. −32 to −44 dB of non-harmonic content, mostly below 700 Hz after the
+tone control, under a dry bass that is usually louder — that is a listening
+question, not a measurement one, and nobody has listened for it specifically.
+The regression test records where the number is so a change is visible. It does
+not claim the number is right.
+
+---
+
+
 ## 4. Fixing what went wrong in Wibeboard
 
 | Wibeboard | BassRig |
@@ -1050,12 +1128,11 @@ reference project above. Consequences:
   distinct and evenly spread, which is not the same as sounding good. The Grunt
   corners (5 / 100 / 250 Hz), the recovery low-pass at 5 kHz and the interstage
   gain of 1.8 are all still first guesses in that sense.
-- The octaver generates its square by hard-switching at base rate, with no
-  band limiting and no oversampling, and the tone low-pass runs after the edge
-  rather than before it. Aliasing is therefore structural. It is the one place
-  in the plugin where a discontinuity is synthesised and the ADAA discipline
-  applied everywhere else is not. Unmeasured — measure against a naive build
-  before assuming it matters.
+- The octaver generates its square by hard-switching at base rate, with no band
+  limiting and no oversampling. Now measured rather than assumed: −32 to −44 dB
+  of off-grid content, improving 6 dB per doubling of sample rate, so
+  oversampling is a poor trade and sub-sample edge placement is the route if it
+  is ever worth fixing. See section 3q. Whether it is audible is still unknown.
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.

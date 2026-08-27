@@ -32,6 +32,8 @@ diagnosis, including the two fixes that were wrong first.
   test forgives a draw near a step, so a broken build passes about one run in
   five and a single green run proves very little.
 - SHA256SUMS.txt for the archives.
+- A regression test pinning the octaver's off-grid energy, so the number is
+  visible if it ever moves.
 
 ## Known limitations
 
@@ -43,7 +45,11 @@ diagnosis, including the two fixes that were wrong first.
   and two bugs in `DESIGN.md` were found that way, but the values are chosen to
   be measurably distinct rather than demonstrably good.
 - The octaver synthesises its square by hard switching at base rate, with no
-  band limiting, so aliasing there is structural. Unmeasured.
+  band limiting. Measured this release: -32 to -44 dB of non-harmonic content
+  depending on the note and the tone setting, worsening about 3 dB per octave up
+  the neck. It improves only 6 dB per doubling of sample rate, so oversampling
+  is a poor trade; see `DESIGN.md` 3q. Whether any of it is audible under a dry
+  bass is still an open question, and a listening one.
 - One unexplained intermittent: a Windows CI runner once failed the chain
   stability test and has not repeated it. It predates this work, does not
   reproduce anywhere, and three candidate explanations were ruled out by

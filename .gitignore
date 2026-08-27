@@ -9,3 +9,4 @@ build/
 # OS
 Thumbs.db
 .DS_Store
+build-asan/

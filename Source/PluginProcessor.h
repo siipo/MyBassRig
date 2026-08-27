@@ -2,6 +2,7 @@
 
 #include "dsp/Pedal.h"
 #include "params/Parameters.h"
+#include "SafePresetManager.h"
 #include "Presets.h"
 #include <juce_audio_processors/juce_audio_processors.h>
 
@@ -68,7 +69,7 @@ public:
     // Looked up by name so the editor does not have to know the chain order.
     const Pedal* findPedal (const char* name) const;
 
-    chowdsp::PresetManager presetManager { apvts };
+    SafePresetManager presetManager { apvts };
 
 private:
     // The whole rig, in signal order. Every pedal runs on every block; each

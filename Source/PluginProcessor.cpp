@@ -2,6 +2,82 @@
 #include "PluginEditor.h"
 #include "dsp/PedalRegistry.h"
 
+#if BASSRIG_CRASH_HANDLER
+ #include <iostream>
+ #include <mutex>
+ #include <windows.h>
+ #include <dbghelp.h>
+
+namespace
+{
+    // Diagnostic only, and off unless -DBASSRIG_CRASH_HANDLER=ON. There is no
+    // debugger on the machine this was built on, so the plugin installs a
+    // handler in the HOST's process and reports where it died from the inside.
+    //
+    // Know its limit before reaching for it: it catches access violations and
+    // NOT heap corruption, which Windows kills with __fastfail, past every
+    // exception handler. Chasing the crash in DESIGN.md 3s it reported once and
+    // then went silent, and the silence turned out to be the more useful half
+    // of the answer. AddressSanitizer (-DBASSRIG_ASAN=ON) named that bug on the
+    // first run; try it first.
+    //
+    // A plugin has no business installing a process-global crash handler in a
+    // shipping build. That is exactly why this is behind a flag that defaults
+    // to off.
+    // Deliberately minimal. An earlier version called SymInitialize with
+    // symbol loading and died inside the handler before it could write
+    // anything -- doing a lot of work in an already-broken process is a good
+    // way to learn nothing. Module plus offset is enough to say WHICH binary
+    // faulted, which is the question.
+    juce::String backtraceWithModules()
+    {
+        void* frames[64] = {};
+        const auto captured = CaptureStackBackTrace (0, 64, frames, nullptr);
+
+        juce::String out;
+
+        for (int i = 0; i < (int) captured; ++i)
+        {
+            out << juce::String (i).paddedLeft (' ', 3) << ": ";
+
+            HMODULE module {};
+            wchar_t modulePath[MAX_PATH] = {};
+
+            if (GetModuleHandleExW (GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                                        | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                    (LPCWSTR) frames[i], &module)
+                && GetModuleFileNameW (module, modulePath, MAX_PATH))
+            {
+                const juce::File file { juce::String (modulePath) };
+                out << file.getFileName().paddedRight (' ', 24) << " +0x"
+                    << juce::String::toHexString ((juce::int64) ((char*) frames[i] - (char*) module));
+            }
+            else
+            {
+                out << "(unknown module) " << juce::String::toHexString ((juce::int64) frames[i]);
+            }
+
+            out << juce::newLine;
+        }
+
+        return out;
+    }
+
+    void bassRigCrashHandler (void*)
+    {
+        const auto trace = backtraceWithModules();
+
+        juce::File::getSpecialLocation (juce::File::tempDirectory)
+            .getChildFile ("bassrig-crash.txt")
+            .appendText ("=== BassRig crash ===\n" + trace + "\n");
+
+        std::cerr << "\n=== BassRig crash ===\n" << trace << std::endl;
+
+        std::_Exit (139);
+    }
+}
+#endif
+
 #include <numeric>
 
 BassRigProcessor::BassRigProcessor()
@@ -10,6 +86,12 @@ BassRigProcessor::BassRigProcessor()
                           .withOutput ("Out", juce::AudioChannelSet::stereo(), true)),
       apvts (*this, nullptr, "STATE", Params::createLayout())
 {
+#if BASSRIG_CRASH_HANDLER
+    static std::once_flag installed;
+    std::call_once (installed, []
+                    { juce::SystemStats::setApplicationCrashHandler (bassRigCrashHandler); });
+#endif
+
     bypassParam = dynamic_cast<Params::LosslessBool*> (apvts.getParameter (ParamID::bypass));
     jassert (bypassParam != nullptr);
 
@@ -19,6 +101,7 @@ BassRigProcessor::BassRigProcessor()
 
     updatePackedOrder();
     apvts.state.addListener (this);
+
 
     auto factoryPresets = Presets::createFactoryPresets (*this);
     presetManager.addPresets (factoryPresets);

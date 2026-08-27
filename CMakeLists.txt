@@ -9,6 +9,18 @@ set_property(GLOBAL PROPERTY USE_FOLDERS YES)
 option(BASSRIG_BUILD_TESTS "Build the unit tests" ON)
 option(BASSRIG_NAIVE_SHAPERS "Diagnostic: bypass ADAA, waveshape naively" OFF)
 
+# Diagnostic: install a process-global crash handler from inside the plugin, so
+# a crash in a HOST we cannot attach a debugger to still reports where it died.
+# See DESIGN.md 3s. Never ship with this on.
+option(BASSRIG_CRASH_HANDLER "Diagnostic: report a backtrace from inside the host" OFF)
+
+# Diagnostic: build the plugin with AddressSanitizer. The crash in DESIGN.md 3s
+# faults in memmove with heap functions below it, and Windows kills heap
+# corruption with __fastfail, which no exception handler can catch -- which is
+# why the in-process backtrace only reported once and then went silent. ASan
+# catches the overrun where it happens instead of where it is noticed.
+option(BASSRIG_ASAN "Diagnostic: build with AddressSanitizer" OFF)
+
 include(FetchContent)
 
 # JUCE 8. Pinned rather than tracking a branch so builds are reproducible.
@@ -80,8 +92,20 @@ target_link_libraries(BassRigDSP
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
 
+if(BASSRIG_CRASH_HANDLER AND WIN32)
+    target_link_libraries(BassRigDSP PUBLIC dbghelp)
+endif()
+
+if(BASSRIG_ASAN AND MSVC)
+    # Applied to the DSP and picked up by everything that links it. Incremental
+    # linking and edit-and-continue debug info are both incompatible with ASan.
+    target_compile_options(BassRigDSP PUBLIC /fsanitize=address /Zi)
+    target_link_options(BassRigDSP PUBLIC /INCREMENTAL:NO /DEBUG)
+endif()
+
 target_compile_definitions(BassRigDSP PUBLIC
     BASSRIG_NAIVE_SHAPERS=$<BOOL:${BASSRIG_NAIVE_SHAPERS}>
+    BASSRIG_CRASH_HANDLER=$<BOOL:${BASSRIG_CRASH_HANDLER}>
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -135,6 +159,18 @@ target_link_libraries(BassRig
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
 
+# ASan annotates std::vector and std::string, and the annotation has to match
+# across every object in the binary -- the wrapper targets JUCE generates
+# included, or the link fails on annotate_vector/annotate_string mismatches.
+if(BASSRIG_ASAN AND MSVC)
+    foreach(asan_target BassRig BassRig_VST3 BassRig_Standalone)
+        if(TARGET ${asan_target})
+            target_compile_options(${asan_target} PRIVATE /fsanitize=address /Zi)
+            target_link_options(${asan_target} PRIVATE /INCREMENTAL:NO /DEBUG)
+        endif()
+    endforeach()
+endif()
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -159,6 +195,47 @@ target_link_libraries(BassRigSnapshot
 target_compile_definitions(BassRigSnapshot PRIVATE
     JucePlugin_Name="BassRig"
     JUCE_STANDALONE_APPLICATION=1)
+
+# ---------------------------------------------------------------------------
+# Crash hunt: a host that loads the built VST3 and reproduces the one crash
+# pluginval finds, with a backtrace. See DESIGN.md 3s and tools/CrashHunt.cpp.
+#
+# Separate from the tests because it needs VST3 HOSTING, which drags in the
+# hosting side of juce_audio_processors and the VST3 SDK headers, and because it
+# is meant to be run by hand until it crashes rather than in CI.
+# ---------------------------------------------------------------------------
+option(BASSRIG_BUILD_CRASH_HUNT "Build the VST3 crash-hunting host" OFF)
+
+if(BASSRIG_BUILD_CRASH_HUNT)
+    juce_add_console_app(BassRigCrashHunt)
+
+    target_sources(BassRigCrashHunt PRIVATE tools/CrashHunt.cpp)
+
+    target_link_libraries(BassRigCrashHunt
+        PRIVATE
+            juce::juce_audio_processors
+            juce::juce_audio_utils
+            juce::juce_recommended_config_flags)
+
+    target_compile_definitions(BassRigCrashHunt PRIVATE
+        JUCE_PLUGINHOST_VST3=1
+        # runDispatchLoopUntil is gated behind this. The whole point of the
+        # harness is to pump the message loop by hand while a worker processes.
+        JUCE_MODAL_LOOPS_PERMITTED=1
+        JUCE_PLUGINHOST_VST=0
+        JUCE_PLUGINHOST_AU=0
+        JUCE_WEB_BROWSER=0
+        JUCE_USE_CURL=0
+        JUCE_STANDALONE_APPLICATION=1)
+
+    # A backtrace without symbols is a list of addresses. MSVC needs the debug
+    # info explicitly in a Release build, and the linker needs telling to emit
+    # the PDB alongside.
+    if(MSVC)
+        target_compile_options(BassRigCrashHunt PRIVATE $<$<CONFIG:Release>:/Zi>)
+        target_link_options(BassRigCrashHunt PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
+    endif()
+endif()
 
 if(BASSRIG_BUILD_TESTS)
     FetchContent_Declare(Catch2

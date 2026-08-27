@@ -37,6 +37,24 @@ the low strings, so the notes Growl exists for behave exactly as before. Peak at
 full Growl drops from 4.52 to 1.80 at 220 Hz, and from 3.69 to 1.24 at 439 Hz.
 See `DESIGN.md` 3r.
 
+## Fixed: a crash under parameter automation
+
+Found by `pluginval`, then by AddressSanitizer. The VST3 wrapper delivers
+automation on the **audio thread**, and chowdsp's preset manager listens to
+every parameter and marks the preset dirty from whatever thread the change
+arrived on. That notification goes out through a `juce::ListenerList` built
+without locking, so a host moving parameters from two threads at once corrupted
+the heap.
+
+It showed up about one run in eight, and only ever on the clean-to-dirty
+transition, which is why it took a while to pin down. Any host automating
+parameters while audio runs could hit it.
+
+Contained by `SafePresetManager`, which keeps the dirty flag on the message
+thread. Behaviour is unchanged for anything already on that thread. This is an
+upstream bug and will be reported there; see `DESIGN.md` 3s for the diagnosis,
+including the two attempts that were wrong first.
+
 ## New
 
 - **macOS and Linux builds**, alongside Windows.
@@ -64,17 +82,10 @@ See `DESIGN.md` 3r.
   the neck. It improves only 6 dB per doubling of sample rate, so oversampling
   is a poor trade; see `DESIGN.md` 3q. Whether any of it is audible under a dry
   bass is still an open question, and a listening one.
-- **A known crash.** `pluginval` segfaults in its parameter thread safety test
-  about one run in eight -- setting every parameter repeatedly from one thread
-  while audio processes on another. It is real and measured, and it is not
-  diagnosed: allocation on the audio thread, the chorus delay line and the chain
-  ordering have all been ruled out by checking, and the plugin's own processor
-  runs the same test clean, so it needs the VST3 wrapper to provoke. Whether any
-  host actually drives parameters hard enough to hit it is unknown. Disclosed
-  rather than waited out; see `DESIGN.md` 3s.
-- A second unexplained intermittent: a Windows CI runner once failed the chain
-  stability test and has not repeated it. Possibly the same fault as above,
-  though nothing links them beyond both being rare and both on Windows.
+- One unexplained intermittent: a Windows CI runner once failed the chain
+  stability test and has not repeated it. It may have been the crash fixed
+  above, since heap corruption can surface as a bad sample as easily as a
+  segfault, but nothing proves that and it is still recorded as open.
 
 ## Licence
 

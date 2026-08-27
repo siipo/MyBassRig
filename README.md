@@ -77,6 +77,17 @@ see `DESIGN.md` section 3p.
 
 CI builds and runs all of this on Linux, macOS and Windows on every push.
 
+Two diagnostics exist for when a host misbehaves in a way tests cannot see, both
+off by default:
+
+```bash
+cmake -B build-asan -DBASSRIG_ASAN=ON          # AddressSanitizer (MSVC)
+cmake -B build -DBASSRIG_BUILD_CRASH_HUNT=ON   # a host that drives the VST3
+```
+
+The first found the crash in `DESIGN.md` 3s on its first run, after two days of
+reasoning had found nothing. Reach for it early.
+
 ### Looking at the UI
 
 `tools/Snapshot.cpp` renders the editor to PNG with no window and no host, one

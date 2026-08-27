@@ -1116,68 +1116,99 @@ number was worth chasing rather than waving at.
 ---
 
 
-## 3s. A crash, open
+## 3s. The crash, found with the right tool
 
-pluginval segfaults in its **"Parameter thread safety"** test. Exit 139, no
-message. It is real, it is rare, and it is not diagnosed.
+pluginval segfaulted in its **"Parameter thread safety"** test, about one run in
+eight. Diagnosed and fixed. The diagnosis took three attempts and only one of
+them was any good, which is the useful part of this section.
 
-| | |
-|---|---|
-| Rate, measured | 2 crashes in 16 local runs, plus 1 CI failure — about 12% |
-| Where | always "Parameter thread safety", never anywhere else |
-| Since | at least commit `7914d2f`; the code it touches predates the CI work |
+### The bug
 
-What that test does is set every parameter 500 times from the message thread
-while `processBlock` runs on another, through the VST3 wrapper.
+The VST3 wrapper delivers automation **on the audio thread**, and chowdsp's
+`PresetManager` listens to every parameter:
 
-### Ruled out, by checking rather than by argument
+```
+JuceVST3Component::process                       <- audio thread
+  processParameterChanges
+    AudioProcessorParameter::setValueNotifyingHost
+      APVTS::ParameterAdapter::parameterValueChanged
+        chowdsp::PresetManager::parameterChanged
+          chowdsp::PresetManager::setIsDirty
+            ListenerList::call                   <- DummyCriticalSection
+              vector::push_back -> realloc -> memmove
+```
 
-- **Allocation on the audio thread.** Audited every pedal's `process()`. None.
-- **Chorus delay-line overrun**, the obvious candidate since it is the only
-  modulated index into a buffer. The LFO is unipolar `[0, 1]` and depth is
-  capped at the allocated headroom, so the read index cannot go negative or past
-  the end.
-- **The chain order.** `processBlock` takes one acquire load of a single atomic
-  word and bounds-checks the nibble it decodes. A concurrent write can only
-  swap one complete permutation for another.
-- **Our processor on its own.** A test that hammers every parameter from a
-  second thread while processing runs clean 12 times out of 12. The VST3
-  wrapper is needed to provoke it, which is why that test is labelled as a smoke
-  test and not as a reproduction.
+`juce::ListenerList` here is built with `juce::DummyCriticalSection`, which does
+no locking at all. Every `call()` pushes an iterator onto an internal vector, so
+with a host moving parameters from the message thread at the same time, two
+threads reallocate that vector concurrently and corrupt the heap.
 
-### A bad inference, recorded
+It is narrow: `parameterChanged` only calls `setIsDirty` on the clean-to-dirty
+transition. That is why it was one run in eight rather than every run.
 
-Disabling the two `ValueTree` listeners gave 8 clean runs out of 8, and that was
-written up as having found the cause. It had not. Re-measuring the **unmodified**
-code afterwards gave 0 crashes in 10. At a 12% rate, eight clean runs happens by
-chance about a third of the time, so the original result carried no information
-at all — the baseline was simply never measured.
+This is an upstream bug, not one of ours. `SafePresetManager` contains it by
+overriding `parameterChanged` -- private but virtual, so an override dispatches
+normally -- and deferring to the message thread when the change did not arrive
+on it. On the message thread nothing changes at all, which is why no existing
+test moved.
 
-The lesson is the same one as sections 3b, 3k and 3q, in a new costume: an
-intermittent fault needs a control group before any change to it means anything.
-Three earlier mistakes in this file were measurements of the wrong quantity.
-This one was a measurement of the right quantity with no baseline, which is
-worse, because it looks like evidence.
+The obvious fix, unregistering the manager and listening in its place, does not
+compile: `PresetManager` inherits `AudioProcessorValueTreeState::Listener`
+privately, so it cannot be handed to `removeParameterListener`.
 
-### Possibly the same thing as 3p's open item
+### Three attempts, one useful
 
-Section 3p records a Windows-only intermittent where the chain stability test
-produced a non-finite sample and never repeated. Same platform, same
-"intermittent, does not reproduce, no explanation". They may well be one fault.
-Recorded as a suspicion, not a finding — there is no evidence linking them
-beyond both being rare and both being on Windows.
+1. **Statistical bisection.** Disabling two `ValueTree` listeners gave 8 clean
+   runs out of 8, and that was written up as the cause. It was not. Re-running
+   the *unmodified* build gave 0 crashes in 10 -- at a 12% rate, eight clean
+   runs happens by chance a third of the time. **The baseline had never been
+   measured.** An intermittent fault needs a control group before any change to
+   it means anything, and this was worse than the measurement mistakes in 3b,
+   3k and 3q, because it looked like evidence.
 
-### What it would take
+2. **A crash handler inside the plugin**, installed into the host's process
+   because there is no debugger on this machine. It reported exactly once --
+   `memmove`, with `recalloc` below it -- and then went silent for every
+   subsequent crash. That silence was itself the clue: Windows kills heap
+   corruption with `__fastfail`, which no exception handler can catch. So the
+   one trace that got through was an access violation, and the rest were the
+   heap noticing later. Kept as `BASSRIG_CRASH_HANDLER`, off by default, with
+   its limits written down.
 
-A stack trace, not more sampling. A 12% race cannot be bisected by running
-things twice and looking at the answer, which is the mistake above. There is no
-debugger on the machine this was built on, so the route is a small host harness
-that loads the VST3 through `VST3PluginFormat` with JUCE's crash handler
-installed to print a backtrace. Not built yet.
+3. **AddressSanitizer**, which named the bug on the first run with the full
+   stack above. `/fsanitize=address`, via `BASSRIG_ASAN`.
 
-Until then this ships as a known defect, and CI will go red intermittently
-because of it. That is the correct behaviour from CI and it should not be
-papered over by lowering the strictness level or dropping the repeat count.
+Two days of inference against one run of the right tool. The lesson is not that
+ASan is good -- it is that "there is no debugger here" was accepted as a
+constraint for far too long, when the actual constraint was only that nobody had
+looked for the tool that does not need one.
+
+`tools/CrashHunt.cpp` came out of attempt 2 as well: a host that loads the VST3
+and reproduces pluginval's scenario in a process we control. It never
+reproduced the crash -- 40 clean iterations -- because it did not replicate
+enough of pluginval's history. Kept anyway, since it is the right shape for the
+next one of these.
+
+### Evidence
+
+| Build | Runs | Result |
+|---|---|---|
+| Before, Release | 16 | 2 crashes, plus 1 on CI |
+| Before, ASan | 1 | container-overflow reported immediately |
+| After, ASan | 8 | clean |
+| After, Release | 12 | clean |
+
+The pass counts alone would not settle it -- 20 clean runs at a 12% rate is a
+one-in-thirteen coincidence. What settles it is that ASan names the defect
+deterministically when it occurs rather than when it happens to crash, and it
+goes from reporting on run 1 to silent.
+
+### Still worth doing
+
+- Report it upstream to chowdsp_utils.
+- An ASan pass in CI would catch the next one of these on the first run instead
+  of the eighth. Not wired up: it is MSVC-only as configured here and adds
+  roughly fifteen minutes.
 
 ---
 
@@ -1283,9 +1314,8 @@ reference project above. Consequences:
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.
-- **pluginval crashes intermittently**, about one run in eight, always in its
-  parameter thread safety test. Real, measured, undiagnosed, and it will make CI
-  red at random. See section 3s.
+- The chowdsp `PresetManager` thread-safety bug in section 3s is contained
+  locally by `SafePresetManager` but has not been reported upstream.
 - **One unexplained failure, still open.** A Windows CI runner failed "every
   order produces finite audio" once, on the first rotation, and has not done it
   again. It does not reproduce: same commit, Visual Studio and Ninja generators

@@ -286,24 +286,58 @@ TEST_CASE ("every order produces finite audio", "[chain][stability]")
 
         const auto out = f.render (55.0f, 0.8f);
 
+        // Scanned rather than asserted per sample. A REQUIRE in the inner loop
+        // costs 700k assertions, stops at the first bad sample, and reports
+        // nothing but "false" -- which is exactly what happened when this
+        // failed on a CI runner and could not be reproduced anywhere else.
+        int nonFinite = 0;
+        int firstBadSample = -1;
+        int firstBadChannel = -1;
+        bool firstWasNan = false;
+        float peak = 0.0f;
+
+        for (int ch = 0; ch < out.getNumChannels(); ++ch)
+        {
+            for (int i = 0; i < out.getNumSamples(); ++i)
+            {
+                const auto sample = out.getSample (ch, i);
+
+                if (! std::isfinite (sample))
+                {
+                    ++nonFinite;
+
+                    if (firstBadSample < 0)
+                    {
+                        firstBadSample = i;
+                        firstBadChannel = ch;
+                        firstWasNan = std::isnan (sample);
+                    }
+                }
+                else
+                {
+                    peak = juce::jmax (peak, std::abs (sample));
+                }
+            }
+        }
+
         juce::String description;
 
         for (const auto index : order)
             description << index << " ";
 
         INFO ("order: " << description);
+        INFO ("non-finite: " << nonFinite << " of "
+                             << (out.getNumChannels() * out.getNumSamples()));
+        INFO ("first bad: sample " << firstBadSample
+                                   << ", channel " << firstBadChannel
+                                   << ", " << (firstWasNan ? "NaN" : "Inf")
+                                   << ", block "
+                                   << (firstBadSample >= 0
+                                           ? firstBadSample / TestSignals::blockSize
+                                           : -1));
+        INFO ("peak of the finite samples: " << peak);
 
-        float peak = 0.0f;
-
-        for (int ch = 0; ch < out.getNumChannels(); ++ch)
-            for (int i = 0; i < out.getNumSamples(); ++i)
-            {
-                const auto sample = out.getSample (ch, i);
-                REQUIRE (std::isfinite (sample));
-                peak = juce::jmax (peak, std::abs (sample));
-            }
-
-        INFO ("peak " << peak);
+        REQUIRE (nonFinite == 0);
         REQUIRE (peak < 16.0f);
     }
 }

@@ -60,6 +60,11 @@ add_library(BassRigDSP STATIC
     Source/params/Parameters.cpp
 )
 
+# The VST3 is a shared module, and on Linux you cannot link non-PIC objects into
+# one: ld rejects the R_X86_64_PC32 relocations outright. Windows and macOS do
+# not care, so this only ever shows up on a Linux build.
+set_target_properties(BassRigDSP PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
+
 target_include_directories(BassRigDSP PUBLIC Source ${chowdsp_wdf_SOURCE_DIR}/include)
 
 target_link_libraries(BassRigDSP

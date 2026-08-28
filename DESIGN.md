@@ -1424,8 +1424,18 @@ reference project above. Consequences:
 - The macOS and Linux builds are CI-verified but have never been run in a host
   by a person. AU passes pluginval; it has not been opened in Logic.
 - Release binaries are unsigned on both Windows and macOS.
-- The chowdsp `PresetManager` thread-safety bug in section 3s is contained
-  locally by `SafePresetManager` but has not been reported upstream.
+- The chowdsp `PresetManager` thread-safety bug in section 3s is reported
+  upstream as Chowdhury-DSP/chowdsp_utils#613 and is contained locally by
+  `SafePresetManager` until it is fixed there.
+- A Linux CI runner failed pluginval's state restoration once, during the v0.2.0
+  build: "Gate not restored", expected 0, read 0.414854. It passed on a re-run,
+  and 4 local runs at `--repeat 10` -- about 40 single runs' worth -- are clean.
+  Unproven hypothesis: pluginval sets the value on the HOST side, VST3 delivers
+  parameter changes with the next process call, and if no audio is processed
+  between the set and the restore then the plugin never receives it, so the
+  plugin's state is already right and it is the host's cache that is stale. That
+  would make it a wrapper interaction rather than a fault here. Written down
+  because a re-run going green is not a diagnosis.
 - **One unexplained failure, still open.** A Windows CI runner failed "every
   order produces finite audio" once, on the first rotation, and has not done it
   again. It does not reproduce: same commit, Visual Studio and Ninja generators

@@ -114,7 +114,15 @@ still passing.
   be measurably distinct rather than demonstrably good.
 - The octaver is monophonic and will stumble on chords and double stops. That is
   what an octaver of this kind does, and it is not a defect being worked around.
-- One unexplained intermittent: a Windows CI runner once failed the chain
+- **Two unexplained intermittents**, both rare, both on CI, neither reproducible
+  locally. A Linux runner failed pluginval's state-restoration check once during
+  this release's build ("Gate not restored", expected 0, read 0.41) and passed
+  on a re-run; 40 equivalent local runs are clean. The suspicion is that
+  pluginval sets the parameter on the HOST side, VST3 delivers it to the plugin
+  with the next process call, and if no audio is processed in between the plugin
+  never sees it -- making the host's cached value the stale one. That is a
+  hypothesis and it is not proven.
+- The older one: a Windows CI runner once failed the chain
   stability test and has not repeated it. It may have been the crash fixed
   above, since heap corruption can surface as a bad sample as easily as a
   segfault, but nothing proves that and it is still recorded as open.
